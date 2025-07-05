@@ -11,8 +11,8 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from core import database as db
-from spider.anti_crawler import AntiCrawlerManager, RequestRateLimiter
-from spider.monitor import CrawlerMonitor
+from .anti_crawler import AntiCrawlerManager, RequestRateLimiter
+from .monitor import CrawlerMonitor
 
 class NationalSpider:
     def __init__(self):
