@@ -15,7 +15,7 @@ git add .
 git commit -m "发布版本 v1.1.1 - 修复数据库路径问题，解决打包后无法爬取的问题"
 
 :: 推送到远程仓库
-git push origin main
+git push origin master
 
 if errorlevel 1 (
     echo.
