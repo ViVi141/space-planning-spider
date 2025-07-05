@@ -157,46 +157,78 @@ class AntiCrawlerManager:
         if 'timeout' not in kwargs:
             kwargs['timeout'] = 15
         
-        # 使用自定义SSL配置
-        if 'verify' not in kwargs:
-            kwargs['verify'] = certifi.where()
+        # 网络环境兼容性配置
+        # 1. 尝试不同的SSL验证策略
+        ssl_strategies = [
+            {'verify': certifi.where()},  # 使用certifi证书
+            {'verify': True},             # 系统默认证书
+            {'verify': False}             # 禁用SSL验证（最后选择）
+        ]
+        
+        # 2. 尝试不同的代理配置
+        proxy_strategies = [
+            {},  # 不使用代理
+            {'proxies': {'http': None, 'https': None}},  # 明确不使用代理
+        ]
         
         # 重试机制
         for attempt in range(self.max_retries):
-            try:
-                response = self.session.request(method, url, **kwargs)
-                
-                if response.status_code == 200:
-                    return response
-                elif response.status_code == 403:
-                    print(f"警告: 收到403状态码，可能被反爬虫检测")
-                    self.random_delay()
-                    self.rotate_session()  # 轮换会话
-                    continue
-                elif response.status_code == 429:
-                    print(f"警告: 收到429状态码，请求过于频繁，等待10秒")
-                    time.sleep(10)
-                    self.rotate_session()  # 轮换会话
-                    continue
-                elif response.status_code in [502, 503, 504]:
-                    print(f"警告: 服务器错误 {response.status_code}，等待重试")
-                    time.sleep(3)
-                    continue
-                else:
-                    response.raise_for_status()
-                    
-            except requests.exceptions.SSLError as e:
-                print(f"SSL错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (attempt + 1))
-                else:
-                    raise
-            except requests.exceptions.RequestException as e:
-                print(f"请求失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (attempt + 1))
-                else:
-                    raise
+            for ssl_strategy in ssl_strategies:
+                for proxy_strategy in proxy_strategies:
+                    try:
+                        # 合并配置
+                        request_kwargs = kwargs.copy()
+                        request_kwargs.update(ssl_strategy)
+                        request_kwargs.update(proxy_strategy)
+                        
+                        # 添加额外的网络兼容性设置
+                        request_kwargs['allow_redirects'] = True
+                        request_kwargs['stream'] = False
+                        
+                        # 设置更宽松的SSL配置
+                        if not request_kwargs.get('verify', True):
+                            import urllib3
+                            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                        
+                        response = self.session.request(method, url, **request_kwargs)
+                        
+                        if response.status_code == 200:
+                            return response
+                        elif response.status_code == 403:
+                            print(f"警告: 收到403状态码，可能被反爬虫检测")
+                            self.random_delay()
+                            self.rotate_session()  # 轮换会话
+                            continue
+                        elif response.status_code == 429:
+                            print(f"警告: 收到429状态码，请求过于频繁，等待10秒")
+                            time.sleep(10)
+                            self.rotate_session()  # 轮换会话
+                            continue
+                        elif response.status_code in [502, 503, 504]:
+                            print(f"警告: 服务器错误 {response.status_code}，等待重试")
+                            time.sleep(3)
+                            continue
+                        else:
+                            response.raise_for_status()
+                            
+                    except requests.exceptions.SSLError as e:
+                        print(f"SSL错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                        continue  # 尝试下一个SSL策略
+                    except requests.exceptions.ProxyError as e:
+                        print(f"代理错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                        continue  # 尝试下一个代理策略
+                    except requests.exceptions.ConnectionError as e:
+                        print(f"连接错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                        continue  # 尝试下一个策略
+                    except requests.exceptions.RequestException as e:
+                        print(f"请求失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                        if attempt < self.max_retries - 1:
+                            time.sleep(self.retry_delay * (attempt + 1))
+                        else:
+                            raise
+                    except Exception as e:
+                        print(f"未知错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
+                        continue
         
         raise Exception("所有重试都失败了")
     

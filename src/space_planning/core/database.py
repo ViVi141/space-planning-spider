@@ -1,8 +1,26 @@
 import sqlite3
 import os
+import sys
+
+def get_database_path():
+    """获取数据库文件路径，支持打包后的环境"""
+    if getattr(sys, 'frozen', False):
+        # 打包后的环境
+        # 使用用户文档目录
+        user_docs = os.path.expanduser("~/Documents")
+        app_data_dir = os.path.join(user_docs, "空间规划政策爬虫系统")
+        
+        # 确保目录存在
+        if not os.path.exists(app_data_dir):
+            os.makedirs(app_data_dir)
+        
+        return os.path.join(app_data_dir, "policy.db")
+    else:
+        # 开发环境
+        return os.path.join(os.path.dirname(__file__), 'policy.db')
 
 def get_conn():
-    db_path = os.path.join(os.path.dirname(__file__), 'policy.db')
+    db_path = get_database_path()
     return sqlite3.connect(db_path)
 
 def init_db():
@@ -102,7 +120,7 @@ class DatabaseManager:
     """数据库管理类"""
     
     def __init__(self):
-        self.db_path = os.path.join(os.path.dirname(__file__), 'policy.db')
+        self.db_path = get_database_path()
     
     def get_conn(self):
         """获取数据库连接"""
