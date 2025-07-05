@@ -39,7 +39,7 @@ kj/
 
 1. **克隆项目**
    ```bash
-   git clone https://gitee.com/your-username/space-planning-spider.git
+   git clone https://gitee.com/ViVi141/space-planning-spider.git
    cd space-planning-spider
    ```
 
@@ -119,8 +119,8 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 如有问题或建议，请通过以下方式联系：
 
-- 提交 Issue：[Gitee Issues](https://gitee.com/your-username/space-planning-spider/issues)
-- 邮箱：your-email@example.com
+- 提交 Issue：[Gitee Issues](https://gitee.com/ViVi141/space-planning-spider/issues)
+- 邮箱：747384120@qq.com
 
 ## ⭐ 如果这个项目对您有帮助，请给个Star！
 
