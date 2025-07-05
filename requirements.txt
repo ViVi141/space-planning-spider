@@ -1,0 +1,7 @@
+PyQt5
+requests
+beautifulsoup4
+python-docx
+fuzzywuzzy
+python-Levenshtein
+lxml 

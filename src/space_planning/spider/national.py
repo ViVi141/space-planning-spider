@@ -1,0 +1,327 @@
+import requests
+from datetime import datetime
+import time
+import random
+import sys
+import os
+
+# 添加路径以便导入模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
+from core import database as db
+from spider.anti_crawler import AntiCrawlerManager, RequestRateLimiter
+from spider.monitor import CrawlerMonitor
+
+class NationalSpider:
+    def __init__(self):
+        self.api_url = "https://www.mohurd.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit"
+        
+        # 初始化防反爬虫管理器
+        self.anti_crawler = AntiCrawlerManager()
+        self.rate_limiter = RequestRateLimiter(max_requests=15, time_window=60)
+        self.monitor = CrawlerMonitor()
+        
+        # 速度模式配置
+        self.speed_mode = "正常速度"
+        
+        # 基础参数
+        self.base_params = {
+            'webId': '86ca573ec4df405db627fdc2493677f3',
+            'pageId': 'vhiC3JxmPC8o7Lqg4Jw0E',
+            'parseType': 'bulidstatic',
+            'pageType': 'column',
+            'tagId': '内容1',
+            'tplSetId': 'fc259c381af3496d85e61997ea7771cb',
+            'unitUrl': '/api-gateway/jpaas-publish-server/front/page/build/unit'
+        }
+        
+        # 设置特定的请求头（住建部网站需要）
+        self.special_headers = {
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Connection': 'keep-alive',
+            'Referer': 'https://www.mohurd.gov.cn/gongkai/zc/wjk/index.html',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-KL-SaaS-Ajax-Request': 'Ajax_Request',
+            'X-Requested-With': 'XMLHttpRequest'
+        }
+
+    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
+        """
+        通过API获取住建部政策文件，基于时间区间过滤
+        Args:
+            keywords: 关键词列表，None表示不限制
+            callback: 进度回调函数，用于GUI显示进度
+            start_date: 起始日期（yyyy-MM-dd）
+            end_date: 结束日期（yyyy-MM-dd）
+            speed_mode: 速度模式（"快速模式"、"正常速度"、"慢速模式"）
+            disable_speed_limit: 是否禁用速度限制
+        """
+        # 设置速度模式
+        self.speed_mode = speed_mode
+        
+        # 根据速度模式调整防反爬虫设置
+        if disable_speed_limit:
+            # 禁用速度限制：最快速度，忽略所有延迟
+            self.anti_crawler.min_delay = 0.0
+            self.anti_crawler.max_delay = 0.0
+            self.anti_crawler.max_requests_per_minute = 999999  # 无限制
+            self.rate_limiter.max_requests = 999999  # 无限制
+        elif speed_mode == "快速模式":
+            self.anti_crawler.min_delay = 0.1
+            self.anti_crawler.max_delay = 0.3
+            self.anti_crawler.max_requests_per_minute = 100
+            self.rate_limiter.max_requests = 30
+        elif speed_mode == "慢速模式":
+            self.anti_crawler.min_delay = 2.0
+            self.anti_crawler.max_delay = 5.0
+            self.anti_crawler.max_requests_per_minute = 10
+            self.rate_limiter.max_requests = 5
+        else:  # 正常速度
+            self.anti_crawler.min_delay = 0.2
+            self.anti_crawler.max_delay = 0.8
+            self.anti_crawler.max_requests_per_minute = 60
+            self.rate_limiter.max_requests = 15
+        
+        policies = []
+        page_size = 30
+        page_no = 1
+        total_processed = 0
+        
+        # 时间区间状态跟踪
+        dt_start = datetime.strptime(start_date, '%Y-%m-%d') if start_date else None
+        dt_end = datetime.strptime(end_date, '%Y-%m-%d') if end_date else None
+        in_target_range = False  # 是否已进入目标时间区间
+        consecutive_out_of_range = 0  # 连续超出范围的页数
+        max_consecutive_out_of_range = 5  # 最大连续超出范围页数
+        
+        while True:
+            # 检查是否停止
+            if stop_callback and stop_callback():
+                print("用户已停止爬取")
+                break
+                
+            print(f"正在检索第 {page_no} 页...")
+            if callback:
+                callback(f"正在检索第 {page_no} 页...")
+            
+            try:
+                # 检查请求频率限制
+                self.rate_limiter.wait_if_needed()
+                
+                import json
+                param_json = {
+                    "pageNo": page_no,
+                    "pageSize": page_size,
+                    "loadEnabled": True,
+                    "search": "{}"
+                }
+                params = self.base_params.copy()
+                params['paramJson'] = json.dumps(param_json)
+                
+                # 合并请求头
+                headers = self.special_headers.copy()
+                headers.update(self.anti_crawler.get_random_headers())
+                
+                # 使用防反爬虫管理器发送请求
+                try:
+                    resp = self.anti_crawler.make_request(
+                        self.api_url, 
+                        method='GET',
+                        params=params, 
+                        headers=headers
+                    )
+                    data = resp.json()
+                    self.monitor.record_request(self.api_url, success=True)
+                except Exception as e:
+                    self.monitor.record_request(self.api_url, success=False, error_type=str(e))
+                    raise
+                html_content = data.get('data', {}).get('html', '')
+                if not html_content:
+                    print(f"第 {page_no} 页无HTML内容，停止检索")
+                    return policies
+                
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, 'html.parser')
+                table = soup.find('table')
+                if not table:
+                    print(f"第 {page_no} 页未找到表格，停止检索")
+                    return policies
+                
+                rows = table.find('tbody').find_all('tr')
+                print(f"第 {page_no} 页找到 {len(rows)} 条政策")
+                page_policies = []
+                page_dates = []
+                
+                for row in rows:
+                    # 检查是否停止
+                    if stop_callback and stop_callback():
+                        print("用户已停止爬取")
+                        break
+                        
+                    cells = row.find_all('td')
+                    if len(cells) >= 4:
+                        title_cell = cells[1]
+                        title_link = title_cell.find('a')
+                        if title_link:
+                            title = title_link.get('title', '') or title_link.get_text(strip=True)
+                            url = title_link.get('href', '')
+                            doc_number = cells[2].get_text(strip=True)
+                            pub_date = cells[3].get_text(strip=True)
+                            if not url.startswith('http'):
+                                url = 'https://www.mohurd.gov.cn' + url
+                            
+                            # 解析日期
+                            try:
+                                dt_pub = datetime.strptime(pub_date, '%Y-%m-%d')
+                                page_dates.append(dt_pub)
+                            except Exception:
+                                continue
+                            
+                            # 时间区间过滤
+                            if dt_start and dt_pub < dt_start:
+                                continue
+                            if dt_end and dt_pub > dt_end:
+                                continue
+                            
+                            # 关键词过滤
+                            if keywords and keywords != [''] and not any(kw in title for kw in keywords):
+                                continue
+                            
+                            print(f"处理政策: {title}")
+                            if callback:
+                                callback(f"正在处理: {title[:30]}...")
+                            
+                            # 根据速度设置决定是否添加延迟
+                            if not disable_speed_limit:
+                                time.sleep(random.uniform(0.5, 2.0))
+                            content = self.get_policy_detail(url, stop_callback)
+                            policy_data = {
+                                'level': '国家住建部',
+                                'title': title,
+                                'pub_date': pub_date,
+                                'doc_number': doc_number,
+                                'source': url,
+                                'content': content,
+                                'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            }
+                            page_policies.append(policy_data)
+                            
+                            # 立即发送单条政策数据到界面
+                            if callback:
+                                callback(f"已获取: {title[:30]}...")
+                                # 发送政策数据信号
+                                callback(f"POLICY_DATA:{title}|{pub_date}|{url}|{content[:100]}")
+                
+                print(f"第 {page_no} 页：找到 {len(rows)} 条，保留 {len(page_policies)} 条")
+                total_processed += len(page_policies)
+                policies.extend(page_policies)
+                
+                # 时间区间状态检查
+                if dt_start and dt_end and page_dates:
+                    min_date = min(page_dates)
+                    max_date = max(page_dates)
+                    
+                    # 检查是否进入目标时间区间
+                    if not in_target_range and min_date <= dt_end and max_date >= dt_start:
+                        in_target_range = True
+                        consecutive_out_of_range = 0
+                        print(f"第 {page_no} 页：进入目标时间区间 [{start_date} - {end_date}]")
+                    
+                    # 检查是否完全脱离目标时间区间
+                    elif in_target_range and (max_date < dt_start or min_date > dt_end):
+                        consecutive_out_of_range += 1
+                        print(f"第 {page_no} 页：脱离目标时间区间，连续 {consecutive_out_of_range} 页")
+                        
+                        # 如果连续多页都脱离范围，停止检索
+                        if consecutive_out_of_range >= max_consecutive_out_of_range:
+                            print(f"连续 {max_consecutive_out_of_range} 页脱离目标时间区间，停止检索")
+                            return policies
+                    else:
+                        consecutive_out_of_range = 0
+                
+                # 更新进度
+                if page_policies:
+                    if callback:
+                        callback(f"在第 {page_no} 页找到 {len(page_policies)} 条政策")
+                else:
+                    if callback:
+                        callback(f"第 {page_no} 页无匹配政策")
+                
+                page_no += 1
+                
+            except Exception as e:
+                print(f"检索第 {page_no} 页时出错: {e}")
+                if callback:
+                    callback(f"检索第 {page_no} 页时出错: {e}")
+                break
+        
+        print(f"爬取完成，共获取 {len(policies)} 条政策")
+        if callback:
+            callback(f"爬取完成，共获取 {len(policies)} 条政策")
+        
+        return policies
+
+    def get_crawler_status(self):
+        """获取爬虫状态"""
+        return {
+            'speed_mode': self.speed_mode,
+            'monitor_stats': self.monitor.get_stats(),
+            'rate_limiter_stats': {
+                'max_requests': self.rate_limiter.max_requests,
+                'time_window': self.rate_limiter.time_window
+            }
+        }
+
+    def get_policy_detail(self, url, stop_callback=None):
+        """获取政策详情内容"""
+        try:
+            # 检查是否停止
+            if stop_callback and stop_callback():
+                return ""
+            
+            # 使用防反爬虫管理器发送请求
+            headers = self.special_headers.copy()
+            headers.update(self.anti_crawler.get_random_headers())
+            
+            resp = self.anti_crawler.make_request(url, headers=headers)
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.content, 'html.parser')
+            
+            # 提取正文内容
+            content_div = soup.find('div', class_='content')
+            if content_div:
+                return content_div.get_text(strip=True)
+            else:
+                return soup.get_text(strip=True)
+        except Exception as e:
+            print(f"获取政策详情失败: {e}")
+            return ""
+
+    def save_to_db(self, policies):
+        """保存政策到数据库"""
+        for policy in policies:
+            db.insert_policy(
+                policy['level'],
+                policy['title'],
+                policy['pub_date'],
+                policy['source'],
+                policy['content'],
+                policy['crawl_time']
+            )
+
+# 为兼容性添加别名类
+class NationalPolicyCrawler(NationalSpider):
+    """国家级政策爬虫类（NationalSpider的别名）"""
+    pass
+
+if __name__ == "__main__":
+    spider = NationalSpider()
+    policies = spider.crawl_policies(['规划', '空间', '用地'])
+    spider.save_to_db(policies)
+    print(f"爬取到 {len(policies)} 条国家住建部政策") 
