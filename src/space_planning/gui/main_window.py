@@ -29,7 +29,7 @@ class SearchThread(QThread):
     finished_signal = pyqtSignal()     # 完成信号
     error_signal = pyqtSignal(str)     # 错误信号
     
-    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度"):
+    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None):
         super().__init__()
         self.level = level
         self.keywords = keywords
@@ -38,6 +38,7 @@ class SearchThread(QThread):
         self.end_date = end_date
         self.enable_anti_crawler = enable_anti_crawler
         self.speed_mode = speed_mode
+        self.spider = spider  # 使用传入的spider实例
         self.stop_flag = False  # 停止标志
     
     def run(self):
@@ -52,11 +53,13 @@ class SearchThread(QThread):
             
             if self.need_crawl and not self.stop_flag:
                 self.progress_signal.emit("正在爬取最新数据...")
-                # 爬取新数据
-                spider = None
-                if self.level == "国家住建部":
+                # 根据选择的机构动态创建对应的爬虫
+                if self.level == "住房和城乡建设部":
                     from space_planning.spider.national import NationalSpider
                     spider = NationalSpider()
+                elif self.level == "广东省人民政府":
+                    from space_planning.spider.guangdong import GuangdongSpider
+                    spider = GuangdongSpider()
                 elif self.level == "全部机构":
                     # 对于全部机构，默认使用国家级爬虫
                     from space_planning.spider.national import NationalSpider
@@ -85,7 +88,7 @@ class SearchThread(QThread):
                             data_parts = message[12:].split("|")
                             if len(data_parts) >= 4:
                                 policy = {
-                                    'level': '国家住建部',
+                                    'level': self.level,  # 使用当前选择的机构级别
                                     'title': data_parts[0],
                                     'pub_date': data_parts[1],
                                     'source': data_parts[2],
@@ -113,14 +116,26 @@ class SearchThread(QThread):
                 # 这里只需要处理停止后的数据保存
                 if new_policies and not self.stop_flag:
                     for i, policy in enumerate(new_policies):
-                        db.insert_policy(
-                            policy['level'], 
-                            policy['title'], 
-                            policy['pub_date'], 
-                            policy['source'], 
-                            policy['content'], 
-                            policy['crawl_time']
-                        )
+                        # 检查policy是字典还是元组
+                        if isinstance(policy, dict):
+                            db.insert_policy(
+                                policy['level'], 
+                                policy['title'], 
+                                policy['pub_date'], 
+                                policy['source'], 
+                                policy['content'], 
+                                policy['crawl_time']
+                            )
+                        elif isinstance(policy, (list, tuple)) and len(policy) >= 6:
+                            # 如果是元组格式：(id, level, title, pub_date, source, content)
+                            db.insert_policy(
+                                policy[1],  # level
+                                policy[2],  # title
+                                policy[3],  # pub_date
+                                policy[4],  # source
+                                policy[5],  # content
+                                datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # crawl_time
+                            )
                 
                 if not self.stop_flag:
                     self.progress_signal.emit(f"爬取完成，共获取 {len(new_policies)} 条新数据")
@@ -147,6 +162,9 @@ class SearchThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.max_display_rows = 100  # 最大显示100行
+        self.page_size = 50  # 每页50行
+        self.current_page = 0  # 当前页码
         self.setWindowTitle("空间规划政策合规性分析系统")
         
         # 设置窗口图标
@@ -157,31 +175,48 @@ class MainWindow(QMainWindow):
         
         self.resize(1400, 900)
         
+        # 创建共享的爬虫实例
+        from space_planning.spider.national import NationalSpider
+        self.spider = NationalSpider()
+        
         self.init_ui()
     
     def create_menu_bar(self):
         """创建菜单栏"""
-        from PyQt5.QtWidgets import QAction
+        from PyQt5.QtWidgets import QAction, QMenuBar, QMenu
         
-        menubar = self.menuBar()
-        file_menu = menubar.addMenu('文件')
-        tools_menu = menubar.addMenu('工具')
-        help_menu = menubar.addMenu('帮助')
+        menubar: QMenuBar = self.menuBar()
+        if menubar is None:
+            return
+            
+        file_menu: QMenu = menubar.addMenu('文件')
+        tools_menu: QMenu = menubar.addMenu('工具')
+        help_menu: QMenu = menubar.addMenu('帮助')
         
-        # 文件菜单
-        export_action = QAction('导出数据', self)
-        export_action.triggered.connect(self.export_data)
-        file_menu.addAction(export_action)
+        if file_menu is not None:
+            # 文件菜单
+            export_action = QAction('导出数据', self)
+            export_action.triggered.connect(self.export_data)
+            file_menu.addAction(export_action)
         
-        # 工具菜单
-        status_action = QAction('爬虫状态', self)
-        status_action.triggered.connect(self.show_crawler_status)
-        tools_menu.addAction(status_action)
+        if tools_menu is not None:
+            # 工具菜单
+            status_action = QAction('爬虫状态实时监控', self)
+            status_action.triggered.connect(self.show_crawler_status)
+            tools_menu.addAction(status_action)
+            
+            # 数据库管理菜单
+            db_action = QAction('数据库管理', self)
+            db_action.triggered.connect(self.show_database_manager)
+            tools_menu.addAction(db_action)
+            
+            # 清理数据库功能已迁移到数据库管理对话框中
         
-        # 帮助菜单
-        about_action = QAction('关于', self)
-        about_action.triggered.connect(self.show_about)
-        help_menu.addAction(about_action)
+        if help_menu is not None:
+            # 帮助菜单
+            about_action = QAction('关于', self)
+            about_action.triggered.connect(self.show_about)
+            help_menu.addAction(about_action)
 
     def init_ui(self):
         # 创建菜单栏
@@ -190,15 +225,16 @@ class MainWindow(QMainWindow):
         main_widget = QWidget()
         main_layout = QVBoxLayout()
 
-        # 顶部：预设模式选择
+        # 预设模式区域
         mode_group = QGroupBox("预设模式")
         mode_layout = QHBoxLayout()
         self.mode_combo = QComboBox()
         self.mode_combo.addItems([
             "日常监控模式 - 最近30天",
-            "项目分析模式 - 最近6个月",
+            "项目分析模式 - 最近6个月", 
             "历史补全模式 - 最近2年",
-            "快速预览模式 - 最近7天"
+            "快速预览模式 - 最近7天",
+            "自定义模式 - 手动设置时间"
         ])
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         mode_layout.addWidget(QLabel("选择模式："))
@@ -213,7 +249,18 @@ class MainWindow(QMainWindow):
         # 第一行：机构、关键词
         row1_layout = QHBoxLayout()
         self.level_combo = QComboBox()
-        self.level_combo.addItems(["全部机构", "国家住建部", "广东省", "中山市", "火炬高技术产业开发区"])
+        
+        # 动态加载已实现的爬虫机构列表
+        try:
+            from space_planning.spider import get_all_spider_levels
+            spider_levels = get_all_spider_levels()
+            self.level_combo.addItems(["全部机构"] + spider_levels)
+            print(f"动态加载的爬虫机构: {spider_levels}")
+        except Exception as e:
+            print(f"动态加载爬虫机构失败: {e}")
+            # 降级方案：只显示已实现的爬虫
+            self.level_combo.addItems(["全部机构", "住房和城乡建设部", "广东省人民政府"])
+        
         self.keyword_edit = QLineEdit()
         self.keyword_edit.setPlaceholderText("请输入项目关键词，如'控制性详细规划'、'建设用地'...")
         self.keyword_edit.setMinimumWidth(300)
@@ -229,10 +276,14 @@ class MainWindow(QMainWindow):
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat('yyyy-MM-dd')
         self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.start_date_edit.dateChanged.connect(self.on_date_changed)  # 添加日期变化监听
+        
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat('yyyy-MM-dd')
         self.end_date_edit.setDate(QDate.currentDate())
+        self.end_date_edit.dateChanged.connect(self.on_date_changed)  # 添加日期变化监听
+        
         row2_layout.addWidget(QLabel("起始日期："))
         row2_layout.addWidget(self.start_date_edit)
         row2_layout.addWidget(QLabel("结束日期："))
@@ -339,23 +390,24 @@ class MainWindow(QMainWindow):
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         
         # 自动调整列宽
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 机构
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)  # 标题自适应
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 发布日期
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 来源
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 政策类型
-        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Fixed)  # 操作列固定宽度
+        header = self.table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 机构
+            header.setSectionResizeMode(1, QHeaderView.Stretch)  # 标题自适应
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 发布日期
+            header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 来源
+            header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 政策类型
+            header.setSectionResizeMode(5, QHeaderView.Fixed)  # 操作列固定宽度
         self.table.setColumnWidth(5, 100)
         
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)  # 允许文字换行
-        self.table.verticalHeader().setDefaultSectionSize(60)  # 设置行高
         
-        # 性能优化：设置最大显示行数
-        self.max_display_rows = 100  # 最大显示100行
-        self.current_page = 0
-        self.page_size = 50  # 每页50行
+        # 设置行高
+        vheader = self.table.verticalHeader()
+        if vheader is not None:
+            vheader.setDefaultSectionSize(60)  # 设置行高
         
         table_layout.addWidget(self.table)
         table_group.setLayout(table_layout)
@@ -383,16 +435,35 @@ class MainWindow(QMainWindow):
         self.full_text = QTextEdit()
         self.full_text.setReadOnly(True)
         self.full_text.setPlaceholderText("在此处显示政策全文...\n\n💡 提示：点击表格中的'📄 查看全文'按钮查看具体政策内容")
-        self.full_text.setMaximumHeight(250)
+        self.full_text.setMinimumHeight(300)  # 增加最小高度
+        self.full_text.setMaximumHeight(1000)  # 增加最大高度
+        self.full_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.full_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.full_text.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # 设置自动换行
         self.full_text.setStyleSheet("""
             QTextEdit {
                 border: 1px solid #ccc;
                 border-radius: 4px;
-                padding: 8px;
+                padding: 12px;
                 background-color: #fafafa;
                 font-family: "Microsoft YaHei", Arial, sans-serif;
                 font-size: 13px;
-                line-height: 1.5;
+                line-height: 1.6;
+                selection-background-color: #0078d4;
+                selection-color: white;
+            }
+            QTextEdit QScrollBar:vertical {
+                background-color: #f0f0f0;
+                width: 12px;
+                border-radius: 6px;
+            }
+            QTextEdit QScrollBar::handle:vertical {
+                background-color: #c0c0c0;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            QTextEdit QScrollBar::handle:vertical:hover {
+                background-color: #a0a0a0;
             }
         """)
         
@@ -444,6 +515,14 @@ class MainWindow(QMainWindow):
             # 最近7天
             self.start_date_edit.setDate(QDate.currentDate().addDays(-7))
             self.end_date_edit.setDate(QDate.currentDate())
+        elif "自定义模式" in mode_text:
+            # 切换到自定义模式时，确保日期是当前日期
+            self.start_date_edit.setDate(QDate.currentDate())
+            self.end_date_edit.setDate(QDate.currentDate())
+
+    def on_date_changed(self):
+        """日期变化时自动切换到自定义模式"""
+        self.mode_combo.setCurrentText("自定义模式 - 手动设置时间")
 
     def on_smart_search(self):
         """智能查询：自动判断数据来源，一键获取最新结果"""
@@ -487,7 +566,8 @@ class MainWindow(QMainWindow):
             # 创建并启动搜索线程
             self.current_data = [] # 清空当前数据
             self.refresh_table([]) # 清空表格
-            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode)
+            # 传递None给SearchThread，让它根据level动态创建爬虫
+            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode, None)
             self.search_thread.progress_signal.connect(self.update_progress)
             self.search_thread.result_signal.connect(self.update_results)
             self.search_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接
@@ -506,7 +586,8 @@ class MainWindow(QMainWindow):
         
         # 如果消息包含"已保存"，更新统计信息
         if "已保存" in message and hasattr(self, 'current_data'):
-            self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
+            if self.stats_label is not None:
+                self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
         
         QApplication.processEvents()
     
@@ -544,7 +625,8 @@ class MainWindow(QMainWindow):
         self._add_single_row(row)
         
         # 更新统计信息
-        self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
+        if self.stats_label is not None:
+            self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
         
         # 强制刷新界面
         QApplication.processEvents()
@@ -585,14 +667,23 @@ class MainWindow(QMainWindow):
         
         # 检查数据库中最新的数据时间
         if db_results:
-            latest_date = max(result[3] for result in db_results if result[3])
-            # 如果最新数据超过7天，爬取新数据
-            try:
-                latest_datetime = datetime.strptime(latest_date, '%Y-%m-%d')
-                if datetime.now() - latest_datetime > timedelta(days=7):
-                    return True
-            except:
-                pass
+            # 兼容不同的数据格式
+            latest_dates = []
+            for result in db_results:
+                if isinstance(result, (list, tuple)) and len(result) > 3:
+                    latest_dates.append(result[3])
+                elif isinstance(result, dict):
+                    latest_dates.append(result.get('pub_date', ''))
+            
+            if latest_dates:
+                latest_date = max(date for date in latest_dates if date)
+                # 如果最新数据超过7天，爬取新数据
+                try:
+                    latest_datetime = datetime.strptime(latest_date, '%Y-%m-%d')
+                    if datetime.now() - latest_datetime > timedelta(days=7):
+                        return True
+                except:
+                    pass
         
         return False
 
@@ -601,7 +692,8 @@ class MainWindow(QMainWindow):
         self.current_data = data
         
         # 更新统计信息
-        self.stats_label.setText(f"共找到 {len(data)} 条政策")
+        if self.stats_label is not None:
+            self.stats_label.setText(f"共找到 {len(data)} 条政策")
         
         # 如果数据量很大，启用分页显示
         if len(data) > self.max_display_rows:
@@ -662,38 +754,56 @@ class MainWindow(QMainWindow):
         """设置表格行数据"""
         # 设置各列数据 - 数据库字段顺序：(id, level, title, pub_date, source, content)
         
+        # 检查item是元组还是字典
+        if isinstance(item, (list, tuple)):
+            # 元组格式：(id, level, title, pub_date, source, content)
+            level = str(item[1]) if len(item) > 1 else ""
+            title = str(item[2]) if len(item) > 2 else ""
+            pub_date = str(item[3]) if len(item) > 3 else ""
+            source = str(item[4]) if len(item) > 4 else ""
+            content = str(item[5]) if len(item) > 5 else ""
+        elif isinstance(item, dict):
+            # 字典格式
+            level = str(item.get('level', ''))
+            title = str(item.get('title', ''))
+            pub_date = str(item.get('pub_date', ''))
+            source = str(item.get('source', ''))
+            content = str(item.get('content', ''))
+        else:
+            # 未知格式，使用默认值
+            level = title = pub_date = source = content = ""
+        
         # 机构列
-        level_item = QTableWidgetItem(str(item[1]))
-        level_item.setTextAlignment(Qt.AlignCenter)
+        level_item = QTableWidgetItem(level)
+        level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row, 0, level_item)
         
         # 标题列 - 支持换行
-        title_item = QTableWidgetItem(str(item[2]))
-        title_item.setToolTip(str(item[2]))  # 鼠标悬停显示完整标题
+        title_item = QTableWidgetItem(title)
+        title_item.setToolTip(title)  # 鼠标悬停显示完整标题
         self.table.setItem(row, 1, title_item)
         
         # 发布日期列
-        date_item = QTableWidgetItem(str(item[3]))
-        date_item.setTextAlignment(Qt.AlignCenter)
+        date_item = QTableWidgetItem(pub_date)
+        date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row, 2, date_item)
         
         # 来源列 - 超链接样式
-        source_item = QTableWidgetItem(str(item[4]))
+        source_item = QTableWidgetItem(source)
         source_item.setForeground(QColor(0, 102, 204))  # 蓝色链接样式
-        source_item.setToolTip(f"点击查看来源：{item[4]}")
+        source_item.setToolTip(f"点击查看来源：{source}")
         self.table.setItem(row, 3, source_item)
         
         # 政策类型列
-        content = item[5] if len(item) > 5 else ""
-        policy_types = self.compliance_analyzer.classify_policy(str(item[2]), content)
+        policy_types = self.compliance_analyzer.classify_policy(title, content)
         type_item = QTableWidgetItem(", ".join(policy_types))
-        type_item.setTextAlignment(Qt.AlignCenter)
+        type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row, 4, type_item)
         
         # 操作列 - 按钮样式
         action_item = QTableWidgetItem("📄 查看全文")
         action_item.setForeground(QColor(0, 128, 0))  # 绿色按钮样式
-        action_item.setTextAlignment(Qt.AlignCenter)
+        action_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         action_item.setToolTip("点击查看政策全文")
         self.table.setItem(row, 5, action_item)
 
@@ -788,7 +898,17 @@ class MainWindow(QMainWindow):
         # 创建政策选择列表
         policy_list = QListWidget()
         for i, policy in enumerate(self.current_data):
-            policy_list.addItem(f"{i+1}. {policy[2]} ({policy[1]})")
+            # 解析政策数据格式
+            if isinstance(policy, (list, tuple)):
+                title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                level = str(policy[1]) if len(policy) > 1 else "未知机构"
+            elif isinstance(policy, dict):
+                title = str(policy.get('title', '未知标题'))
+                level = str(policy.get('level', '未知机构'))
+            else:
+                title = "未知标题"
+                level = "未知机构"
+            policy_list.addItem(f"{i+1}. {title} ({level})")
         layout.addWidget(policy_list)
         
         # 对比结果显示
@@ -813,11 +933,13 @@ class MainWindow(QMainWindow):
                 selected_policies = []
                 for item in selected_items:
                     index = policy_list.row(item)
-                    selected_policies.append(self.current_data[index])
+                    if index < len(self.current_data):
+                        selected_policies.append(self.current_data[index])
                 
                 # 进行对比分析
-                analysis_result = self.analyze_policies(selected_policies)
-                result_text.setText(analysis_result)
+                if selected_policies:
+                    analysis_result = self.analyze_policies(selected_policies)
+                    result_text.setText(analysis_result)
         
         policy_list.itemSelectionChanged.connect(analyze_selected)
         
@@ -833,8 +955,18 @@ class MainWindow(QMainWindow):
         # 关键词分析
         result += "1. 关键词分析：\n"
         for i, policy in enumerate(policies):
-            keywords = self.comparer.find_keywords(policy[5])
-            result += f"   政策{i+1}（{policy[1]}）：{', '.join(keywords) if keywords else '无关键词'}\n"
+            # 解析政策数据格式
+            if isinstance(policy, (list, tuple)):
+                content = str(policy[5]) if len(policy) > 5 else ""
+                level = str(policy[1]) if len(policy) > 1 else ""
+            elif isinstance(policy, dict):
+                content = str(policy.get('content', ''))
+                level = str(policy.get('level', ''))
+            else:
+                content = level = ""
+            
+            keywords = self.comparer.find_keywords(content)
+            result += f"   政策{i+1}（{level}）：{', '.join(keywords) if keywords else '无关键词'}\n"
         
         result += "\n2. 相似度分析：\n"
         # 两两对比
@@ -914,9 +1046,17 @@ class MainWindow(QMainWindow):
         suggestions = []
         
         for i, policy in enumerate(self.current_data):
-            # 获取政策内容
-            content = policy[5] if len(policy) > 5 else ""
-            title = policy[2]
+            # 解析政策数据格式
+            if isinstance(policy, (list, tuple)):
+                content = str(policy[5]) if len(policy) > 5 else ""
+                title = str(policy[2]) if len(policy) > 2 else ""
+                pub_date = str(policy[3]) if len(policy) > 3 else ""
+            elif isinstance(policy, dict):
+                content = str(policy.get('content', ''))
+                title = str(policy.get('title', ''))
+                pub_date = str(policy.get('pub_date', ''))
+            else:
+                content = title = pub_date = ""
             
             # 政策分类
             policy_types = self.compliance_analyzer.classify_policy(title, content)
@@ -929,7 +1069,7 @@ class MainWindow(QMainWindow):
             if compliance['score'] > 50:
                 high_impact_policies.append({
                     'title': title,
-                    'pub_date': policy[3],
+                    'pub_date': pub_date,
                     'score': compliance['score'],
                     'impact': compliance['impact'],
                     'risks': compliance['risks'],
@@ -988,130 +1128,115 @@ class MainWindow(QMainWindow):
         text = self.full_text.toPlainText()
         if text:
             clipboard = QApplication.clipboard()
-            clipboard.setText(text)
-            QMessageBox.information(self, "复制成功", "政策全文已复制到剪贴板")
+            if clipboard is not None:
+                clipboard.setText(text)
+                QMessageBox.information(self, "复制成功", f"政策全文已复制到剪贴板：\n{text}")
+            else:
+                QMessageBox.warning(self, "错误", "无法访问系统剪贴板")
         else:
             QMessageBox.warning(self, "提示", "没有可复制的内容")
-    
     def on_table_click(self, row, col):
         """处理表格点击事件"""
         if row >= len(self.current_data):
             return
             
+        # 获取当前行的数据
+        item = self.current_data[row]
+        
+        # 解析数据格式
+        if isinstance(item, (list, tuple)):
+            source = str(item[4]) if len(item) > 4 else ""
+            content = str(item[5]) if len(item) > 5 else ""
+            title = str(item[2]) if len(item) > 2 else ""
+        elif isinstance(item, dict):
+            source = str(item.get('source', ''))
+            content = str(item.get('content', ''))
+            title = str(item.get('title', ''))
+        else:
+            source = content = title = ""
+            
         if col == 3:  # 点击来源列
-            source = self.current_data[row][4]
             # 实际复制到剪贴板
             clipboard = QApplication.clipboard()
-            clipboard.setText(source)
-            QMessageBox.information(self, "复制成功", f"政策来源已复制到剪贴板：\n{source}")
+            if clipboard is not None:
+                clipboard.setText(source)
+                QMessageBox.information(self, "复制成功", f"政策来源已复制到剪贴板：\n{source}")
+            else:
+                QMessageBox.warning(self, "错误", "无法访问系统剪贴板")
         elif col == 5:  # 点击"查看全文"列
-            # 兼容tuple和dict
-            content = self.current_data[row][5] if len(self.current_data[row]) > 5 else ""
             if content:
-                # 保留原始格式，使用setHtml而不是setText
-                self.full_text.setPlainText(content)
+                # 处理文本内容，确保正确显示
+                if self.full_text is not None:
+                    # 清理文本内容，移除多余的空白字符
+                    cleaned_content = content.strip()
+                    # 替换多个连续换行为单个换行
+                    import re
+                    cleaned_content = re.sub(r'\n\s*\n', '\n\n', cleaned_content)
+                    # 确保文本有足够的换行
+                    if '\n' not in cleaned_content:
+                        # 如果文本很长但没有换行，尝试按句号分割
+                        cleaned_content = re.sub(r'([。！？；])', r'\1\n', cleaned_content)
+                    
+                    # 设置文本内容
+                    self.full_text.setPlainText(cleaned_content)
+                    
+                    # 强制更新布局
+                    self.full_text.updateGeometry()
+                    
+                    # 滚动到顶部
+                    cursor = self.full_text.textCursor()
+                    cursor.movePosition(cursor.Start)
+                    self.full_text.setTextCursor(cursor)
+                    
+                    # 确保文本可见并强制刷新
+                    self.full_text.ensureCursorVisible()
+                    self.full_text.repaint()
+                    
+                    # 强制处理事件
+                    QApplication.processEvents()
+                
                 # 更新标题
-                title = self.current_data[row][2]
-                self.full_text_title.setText(f"正在查看：{title}")
-                # 滚动到全文区域
-                self.full_text.setFocus()
-                # 不显示弹窗提示，静默显示
+                if self.full_text_title is not None:
+                    self.full_text_title.setText(f"正在查看：{title}")
+                
+                # 滚动到全文区域并设置焦点
+                if self.full_text is not None:
+                    self.full_text.setFocus()
                 
                 # 重新设置该行的样式，确保来源列保持超链接样式
                 self._set_table_row(row, self.current_data[row])
             else:
                 # 静默处理，不显示弹窗
-                self.full_text.setPlainText("该政策暂无全文内容")
-                self.full_text_title.setText("暂无内容")
+                if self.full_text is not None:
+                    self.full_text.setPlainText("该政策暂无全文内容")
+                if self.full_text_title is not None:
+                    self.full_text_title.setText("暂无内容")
     
     def show_crawler_status(self):
-        """显示爬虫状态"""
+        """显示爬虫状态实时监控"""
         try:
-            spider = NationalSpider()
-            status = spider.get_crawler_status()
-            
-            from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton, QHBoxLayout
-            
-            dialog = QDialog(self)
-            dialog.setWindowTitle("爬虫状态监控")
-            dialog.resize(600, 500)
-            
-            layout = QVBoxLayout()
-            
-            # 状态显示区域
-            status_text = QTextEdit()
-            status_text.setReadOnly(True)
-            
-            # 格式化状态信息
-            status_info = "=== 爬虫状态监控 ===\n\n"
-            
-            # 防反爬虫信息
-            anti_info = status['anti_crawler_info']
-            status_info += "【防反爬虫状态】\n"
-            status_info += f"总请求数: {anti_info['total_requests']}\n"
-            status_info += f"被屏蔽IP数: {anti_info['blocked_ips']}\n"
-            status_info += f"代理池数量: {anti_info['proxy_count']}\n"
-            status_info += f"当前代理: {anti_info['current_proxy'] or '无'}\n\n"
-            
-            # 监控统计
-            monitor_stats = status['monitor_stats']
-            runtime_stats = monitor_stats['runtime_stats']
-            status_info += "【运行统计】\n"
-            status_info += f"运行时间: {runtime_stats['runtime_hours']:.2f} 小时\n"
-            status_info += f"总请求数: {runtime_stats['total_requests']}\n"
-            status_info += f"成功请求: {runtime_stats['total_success']}\n"
-            status_info += f"失败请求: {runtime_stats['total_errors']}\n"
-            status_info += f"成功率: {runtime_stats['success_rate']:.2%}\n"
-            status_info += f"每小时请求数: {runtime_stats['requests_per_hour']:.1f}\n\n"
-            
-            # 错误摘要
-            error_summary = monitor_stats['error_summary']
-            if error_summary:
-                status_info += "【错误摘要】\n"
-                for error_type, count in error_summary.items():
-                    status_info += f"{error_type}: {count} 次\n"
-                status_info += "\n"
-            
-            # 建议
-            recommendations = monitor_stats['recommendations']
-            if recommendations:
-                status_info += "【优化建议】\n"
-                for rec in recommendations:
-                    status_info += f"• {rec}\n"
-                status_info += "\n"
-            
-            # 域名统计
-            domain_stats = monitor_stats['domain_stats']
-            if domain_stats:
-                status_info += "【域名统计】\n"
-                for domain, stats in domain_stats.items():
-                    status_info += f"{domain}:\n"
-                    status_info += f"  成功率: {stats['success_rate']:.2%}\n"
-                    status_info += f"  请求频率: {stats['request_frequency']:.1f}/分钟\n"
-                    status_info += f"  总请求数: {stats['total_requests']}\n"
-            
-            status_text.setPlainText(status_info)
-            layout.addWidget(status_text)
-            
-            # 按钮区域
-            button_layout = QHBoxLayout()
-            close_btn = QPushButton("关闭")
-            close_btn.clicked.connect(dialog.accept)
-            button_layout.addStretch()
-            button_layout.addWidget(close_btn)
-            layout.addLayout(button_layout)
-            
-            dialog.setLayout(layout)
-            dialog.exec_()
-            
+            from space_planning.gui.crawler_status_dialog import CrawlerStatusDialog
+            dialog = CrawlerStatusDialog(self)
+            dialog.show()  # 使用show()而不是exec_()，保持非模态
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"获取爬虫状态失败: {str(e)}")
+            QMessageBox.warning(self, "错误", f"打开爬虫状态监控失败: {str(e)}")
+    
+    def show_database_manager(self):
+        """显示数据库管理对话框"""
+        try:
+            from .database_manager_dialog import DatabaseManagerDialog
+            dialog = DatabaseManagerDialog(self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"打开数据库管理失败: {str(e)}")
+    
+    # 清理数据库功能已迁移到数据库管理对话框中
     
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.0\n"
+            "版本: 2.0.0\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
             "防反爬虫功能已启用，包含:\n"

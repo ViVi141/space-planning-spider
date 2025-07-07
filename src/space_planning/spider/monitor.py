@@ -96,14 +96,31 @@ class CrawlerMonitor:
             total_success = sum(self.success_stats.values())
             total_errors = sum(self.error_stats.values())
             
+            # 计算成功率
+            success_rate = total_success / total_requests if total_requests > 0 else 0
+            
+            # 计算每小时请求数
+            requests_per_hour = total_requests / (runtime / 3600) if runtime > 0 else 0
+            
+            # 计算最近1小时的请求数
+            one_hour_ago = current_time - 3600
+            recent_requests = 0
+            for domain_requests in self.request_stats.values():
+                recent_requests += len([
+                    req for req in domain_requests 
+                    if req['time'] > one_hour_ago
+                ])
+            
             return {
                 'runtime_seconds': runtime,
                 'runtime_hours': runtime / 3600,
                 'total_requests': total_requests,
                 'total_success': total_success,
                 'total_errors': total_errors,
-                'success_rate': total_success / total_requests if total_requests > 0 else 0,
-                'requests_per_hour': total_requests / (runtime / 3600) if runtime > 0 else 0
+                'success_rate': success_rate,
+                'requests_per_hour': requests_per_hour,
+                'recent_requests_1h': recent_requests,
+                'active_domains': len(self.request_stats)
             }
     
     def should_slow_down(self, domain):
@@ -165,11 +182,23 @@ class CrawlerMonitor:
         }
     
     def get_stats(self):
-        """获取统计信息（简化版）"""
+        """获取统计信息（完整版）"""
         runtime_stats = self.get_runtime_stats()
+        error_summary = self.get_error_summary()
+        recommendations = self.get_recommendations()
+        
+        # 构建域名统计
+        domain_stats = {}
+        for domain, requests in self.request_stats.items():
+            domain_stats[domain] = {
+                'success_rate': self.get_success_rate(domain),
+                'request_frequency': self.get_request_frequency(domain),
+                'total_requests': len(requests)
+            }
+        
         return {
-            'total_requests': runtime_stats['total_requests'],
-            'success_rate': runtime_stats['success_rate'],
-            'requests_per_hour': runtime_stats['requests_per_hour'],
-            'runtime_hours': runtime_stats['runtime_hours']
+            'runtime_stats': runtime_stats,
+            'error_summary': error_summary,
+            'recommendations': recommendations,
+            'domain_stats': domain_stats
         } 

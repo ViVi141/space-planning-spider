@@ -4,11 +4,27 @@
 配置文件
 """
 
+import os
+import sys
+import json
+from pathlib import Path
+
+# 应用配置
+APP_CONFIG = {
+    'app_name': '空间规划政策爬虫系统',
+    'app_version': '1.0.0',
+    'install_mode': True,  # 是否使用安装模式
+    'data_dir_name': '空间规划政策爬虫系统',  # 数据目录名称
+}
+
 # 数据库配置
 DATABASE_CONFIG = {
     'max_display_count': 1000,  # 最大显示数量
     'max_crawl_pages': 50,      # 最大爬取页数
     'timeout': 10,              # 网络请求超时时间
+    'backup_enabled': True,     # 是否启用数据库备份
+    'backup_interval': 7,       # 备份间隔（天）
+    'max_backup_count': 10,     # 最大备份文件数量
 }
 
 # 爬虫配置
@@ -23,7 +39,6 @@ SPIDER_CONFIG = {
 
 # 防反爬虫配置
 ANTI_CRAWLER_CONFIG = {
-    'enable_proxy': False,  # 是否启用代理
     'enable_rotation': True,  # 是否启用会话轮换
     'enable_frequency_limit': True,  # 是否启用频率限制
     'max_concurrent_requests': 5,  # 最大并发请求数
@@ -58,43 +73,168 @@ COMPLIANCE_KEYWORDS = {
     '标准性': ['标准', '规范', '要求', '指标', '参数']
 }
 
-class Config:
-    """配置管理类"""
+class AppConfig:
+    """应用配置管理类"""
     
     def __init__(self):
-        self.database = DATABASE_CONFIG
-        self.spider = SPIDER_CONFIG
-        self.anti_crawler = ANTI_CRAWLER_CONFIG
-        self.ui = UI_CONFIG
-        self.policy_types = POLICY_TYPES
-        self.compliance_keywords = COMPLIANCE_KEYWORDS
+        self.app_name = APP_CONFIG['app_name']
+        self.app_version = APP_CONFIG['app_version']
+        self.install_mode = APP_CONFIG['install_mode']
+        self.data_dir_name = APP_CONFIG['data_dir_name']
+        
+        # 获取应用数据目录
+        self.app_data_dir = self._get_app_data_dir()
+        self.config_file = os.path.join(self.app_data_dir, 'app_config.json')
+        
+        # 加载或创建配置文件
+        self._load_or_create_config()
+    
+    def _get_app_data_dir(self):
+        """获取应用数据目录"""
+        if self.install_mode:
+            # 安装模式：使用用户文档目录
+            if sys.platform == 'win32':
+                # Windows: 用户文档目录
+                user_docs = os.path.expanduser("~/Documents")
+                app_data_dir = os.path.join(user_docs, self.data_dir_name)
+            elif sys.platform == 'darwin':
+                # macOS: 应用支持目录
+                app_data_dir = os.path.expanduser(f"~/Library/Application Support/{self.data_dir_name}")
+            else:
+                # Linux: 用户配置目录
+                app_data_dir = os.path.expanduser(f"~/.config/{self.data_dir_name}")
+        else:
+            # 便携模式：使用程序目录
+            if getattr(sys, 'frozen', False):
+                # 打包后的环境
+                app_data_dir = os.path.join(os.path.dirname(sys.executable), 'data')
+            else:
+                # 开发环境
+                app_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data')
+        
+        # 确保目录存在
+        os.makedirs(app_data_dir, exist_ok=True)
+        return app_data_dir
+    
+    def _load_or_create_config(self):
+        """加载或创建配置文件"""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = json.load(f)
+            except Exception as e:
+                print(f"加载配置文件失败: {e}")
+                self.config = self._get_default_config()
+        else:
+            self.config = self._get_default_config()
+            self._save_config()
+    
+    def _get_default_config(self):
+        """获取默认配置"""
+        return {
+            'install_mode': self.install_mode,
+            'database': DATABASE_CONFIG,
+            'spider': SPIDER_CONFIG,
+            'anti_crawler': ANTI_CRAWLER_CONFIG,
+            'ui': UI_CONFIG,
+            'policy_types': POLICY_TYPES,
+            'compliance_keywords': COMPLIANCE_KEYWORDS,
+            'last_backup_time': None,
+            'database_path': os.path.join(self.app_data_dir, 'policy.db'),
+            'backup_dir': os.path.join(self.app_data_dir, 'backups'),
+        }
+    
+    def _save_config(self):
+        """保存配置到文件"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存配置文件失败: {e}")
+    
+    def get_database_path(self):
+        """获取数据库路径"""
+        return self.config.get('database_path', os.path.join(self.app_data_dir, 'policy.db'))
+    
+    def get_backup_dir(self):
+        """获取备份目录"""
+        backup_dir = self.config.get('backup_dir', os.path.join(self.app_data_dir, 'backups'))
+        os.makedirs(backup_dir, exist_ok=True)
+        return backup_dir
+    
+    def update_config(self, key, value):
+        """更新配置"""
+        self.config[key] = value
+        self._save_config()
+    
+    def get_config(self, key, default=None):
+        """获取配置值"""
+        return self.config.get(key, default)
+    
+    def get_database_config(self):
+        """获取数据库配置"""
+        return self.config.get('database', DATABASE_CONFIG)
+    
+    def get_spider_config(self):
+        """获取爬虫配置"""
+        return self.config.get('spider', SPIDER_CONFIG)
+    
+    def get_anti_crawler_config(self):
+        """获取防反爬虫配置"""
+        return self.config.get('anti_crawler', ANTI_CRAWLER_CONFIG)
+    
+    def get_ui_config(self):
+        """获取界面配置"""
+        return self.config.get('ui', UI_CONFIG)
+    
+    def get_policy_types(self):
+        """获取政策类型关键词"""
+        return self.config.get('policy_types', POLICY_TYPES)
+    
+    def get_compliance_keywords(self):
+        """获取合规性关键词"""
+        return self.config.get('compliance_keywords', COMPLIANCE_KEYWORDS)
+
+# 全局配置实例
+app_config = AppConfig()
+
+class Config:
+    """配置管理类（向后兼容）"""
+    
+    def __init__(self):
+        self.database = app_config.get_database_config()
+        self.spider = app_config.get_spider_config()
+        self.anti_crawler = app_config.get_anti_crawler_config()
+        self.ui = app_config.get_ui_config()
+        self.policy_types = app_config.get_policy_types()
+        self.compliance_keywords = app_config.get_compliance_keywords()
     
     @classmethod
     def get_database_config(cls):
         """获取数据库配置"""
-        return DATABASE_CONFIG
+        return app_config.get_database_config()
     
     @classmethod
     def get_spider_config(cls):
         """获取爬虫配置"""
-        return SPIDER_CONFIG
+        return app_config.get_spider_config()
     
     @classmethod
     def get_anti_crawler_config(cls):
         """获取防反爬虫配置"""
-        return ANTI_CRAWLER_CONFIG
+        return app_config.get_anti_crawler_config()
     
     @classmethod
     def get_ui_config(cls):
         """获取界面配置"""
-        return UI_CONFIG
+        return app_config.get_ui_config()
     
     @classmethod
     def get_policy_types(cls):
         """获取政策类型关键词"""
-        return POLICY_TYPES
+        return app_config.get_policy_types()
     
     @classmethod
     def get_compliance_keywords(cls):
         """获取合规性关键词"""
-        return COMPLIANCE_KEYWORDS 
+        return app_config.get_compliance_keywords() 

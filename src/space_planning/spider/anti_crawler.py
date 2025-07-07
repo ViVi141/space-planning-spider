@@ -21,7 +21,7 @@ class AntiCrawlerManager:
     """防反爬虫管理器"""
     
     def __init__(self):
-        self.request_history = {}  # 记录请求历史
+        self.request_history = []  # 记录请求历史
         self.ip_blacklist = set()  # IP黑名单
         self.session = requests.Session()
         self.lock = threading.Lock()
@@ -102,7 +102,15 @@ class AntiCrawlerManager:
         current_time = datetime.now()
         
         with self.lock:
+            # 确保request_history是字典类型
+            if not isinstance(self.request_history, dict):
+                self.request_history = {}
+            
             if domain not in self.request_history:
+                self.request_history[domain] = []
+            
+            # 确保domain对应的值是列表类型
+            if not isinstance(self.request_history[domain], list):
                 self.request_history[domain] = []
             
             # 清理超过1分钟的历史记录
@@ -243,7 +251,7 @@ class AntiCrawlerManager:
     def get_session_info(self):
         """获取会话信息"""
         return {
-            'total_requests': len([reqs for reqs in self.request_history.values()]),
+            'total_requests': len(self.request_history),
             'blocked_ips': len(self.ip_blacklist),
             'proxy_count': 0,  # 代理池已移除
             'current_proxy': None

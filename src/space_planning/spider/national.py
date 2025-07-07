@@ -13,6 +13,10 @@ sys.path.insert(0, parent_dir)
 from core import database as db
 from .anti_crawler import AntiCrawlerManager, RequestRateLimiter
 from .monitor import CrawlerMonitor
+from bs4 import BeautifulSoup, Tag
+
+# 机构名称常量
+LEVEL_NAME = "住房和城乡建设部"
 
 class NationalSpider:
     def __init__(self):
@@ -146,35 +150,46 @@ class NationalSpider:
                     print(f"第 {page_no} 页无HTML内容，停止检索")
                     return policies
                 
-                from bs4 import BeautifulSoup
                 soup = BeautifulSoup(html_content, 'html.parser')
                 table = soup.find('table')
-                if not table:
+                if not isinstance(table, Tag):
                     print(f"第 {page_no} 页未找到表格，停止检索")
                     return policies
-                
-                rows = table.find('tbody').find_all('tr')
+                tbody = table.find('tbody')
+                if not isinstance(tbody, Tag):
+                    print(f"第 {page_no} 页未找到tbody，停止检索")
+                    return policies
+                rows = tbody.find_all('tr')
                 print(f"第 {page_no} 页找到 {len(rows)} 条政策")
                 page_policies = []
                 page_dates = []
                 
                 for row in rows:
+                    if not isinstance(row, Tag):
+                        continue
                     # 检查是否停止
                     if stop_callback and stop_callback():
                         print("用户已停止爬取")
                         break
                         
-                    cells = row.find_all('td')
+                    cells = row.find_all('td') if hasattr(row, 'find_all') else []
                     if len(cells) >= 4:
-                        title_cell = cells[1]
-                        title_link = title_cell.find('a')
-                        if title_link:
+                        # 将ResultSet转换为列表，避免索引问题
+                        cells_list = list(cells)
+                        title_cell = cells_list[1] if len(cells_list) > 1 else None
+                        title_link = None
+                        if isinstance(title_cell, Tag):
+                            title_link = title_cell.find('a')
+                        if title_link and isinstance(title_link, Tag):
                             title = title_link.get('title', '') or title_link.get_text(strip=True)
                             url = title_link.get('href', '')
-                            doc_number = cells[2].get_text(strip=True)
-                            pub_date = cells[3].get_text(strip=True)
-                            if not url.startswith('http'):
-                                url = 'https://www.mohurd.gov.cn' + url
+                        else:
+                            title = ''
+                            url = ''
+                        doc_number = cells_list[2].get_text(strip=True) if len(cells_list) > 2 and isinstance(cells_list[2], Tag) else ''
+                        pub_date = cells_list[3].get_text(strip=True) if len(cells_list) > 3 and isinstance(cells_list[3], Tag) else ''
+                        if isinstance(url, str) and not url.startswith('http'):
+                            url = 'https://www.mohurd.gov.cn' + url
                             
                             # 解析日期
                             try:
@@ -202,7 +217,7 @@ class NationalSpider:
                                 time.sleep(random.uniform(0.5, 2.0))
                             content = self.get_policy_detail(url, stop_callback)
                             policy_data = {
-                                'level': '国家住建部',
+                                'level': '住房和城乡建设部',
                                 'title': title,
                                 'pub_date': pub_date,
                                 'doc_number': doc_number,
@@ -215,8 +230,8 @@ class NationalSpider:
                             # 立即发送单条政策数据到界面
                             if callback:
                                 callback(f"已获取: {title[:30]}...")
-                                # 发送政策数据信号
-                                callback(f"POLICY_DATA:{title}|{pub_date}|{url}|{content[:100]}")
+                                # 发送政策数据信号 - 发送完整内容
+                                callback(f"POLICY_DATA:{title}|{pub_date}|{url}|{content}")
                 
                 print(f"第 {page_no} 页：找到 {len(rows)} 条，保留 {len(page_policies)} 条")
                 total_processed += len(page_policies)
@@ -256,7 +271,9 @@ class NationalSpider:
                 page_no += 1
                 
             except Exception as e:
+                import traceback
                 print(f"检索第 {page_no} 页时出错: {e}")
+                print(f"错误详情: {traceback.format_exc()}")
                 if callback:
                     callback(f"检索第 {page_no} 页时出错: {e}")
                 break
@@ -290,6 +307,10 @@ class NationalSpider:
             headers.update(self.anti_crawler.get_random_headers())
             
             resp = self.anti_crawler.make_request(url, headers=headers)
+            
+            # 记录成功的详情页面请求
+            self.monitor.record_request(url, success=True)
+            
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(resp.content, 'html.parser')
             
@@ -300,20 +321,36 @@ class NationalSpider:
             else:
                 return soup.get_text(strip=True)
         except Exception as e:
+            # 记录失败的详情页面请求
+            self.monitor.record_request(url, success=False, error_type=str(e))
+            import traceback
             print(f"获取政策详情失败: {e}")
+            print(f"错误详情: {traceback.format_exc()}")
             return ""
 
     def save_to_db(self, policies):
         """保存政策到数据库"""
         for policy in policies:
-            db.insert_policy(
-                policy['level'],
-                policy['title'],
-                policy['pub_date'],
-                policy['source'],
-                policy['content'],
-                policy['crawl_time']
-            )
+            # 检查policy是字典还是其他格式
+            if isinstance(policy, dict):
+                db.insert_policy(
+                    policy['level'],
+                    policy['title'],
+                    policy['pub_date'],
+                    policy['source'],
+                    policy['content'],
+                    policy['crawl_time']
+                )
+            elif isinstance(policy, (list, tuple)) and len(policy) >= 6:
+                # 如果是元组格式：(id, level, title, pub_date, source, content)
+                db.insert_policy(
+                    policy[1],  # level
+                    policy[2],  # title
+                    policy[3],  # pub_date
+                    policy[4],  # source
+                    policy[5],  # content
+                    datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # crawl_time
+                )
 
 # 为兼容性添加别名类
 class NationalPolicyCrawler(NationalSpider):

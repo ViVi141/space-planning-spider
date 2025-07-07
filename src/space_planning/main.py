@@ -35,9 +35,22 @@ def setup_qt_environment():
 setup_qt_environment()
 
 from space_planning.gui.main_window import main
+from space_planning.core import database as db
+from space_planning.core import config
 
 if __name__ == "__main__":
     try:
+        print("正在初始化应用配置...")
+        # 确保配置系统初始化
+        app_config = config.app_config
+        print(f"应用数据目录: {app_config.app_data_dir}")
+        print(f"数据库路径: {app_config.get_database_path()}")
+        print(f"安装模式: {'是' if app_config.install_mode else '否'}")
+        
+        print("正在初始化数据库...")
+        db.init_db()
+        print("数据库初始化完成")
+        
         main()
     except Exception as e:
         print(f"运行失败: {e}")
