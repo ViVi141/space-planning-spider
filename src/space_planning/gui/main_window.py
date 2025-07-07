@@ -69,6 +69,9 @@ class SearchThread(QThread):
                     from space_planning.spider.national import NationalSpider
                     spider = NationalSpider()
                 
+                # 保存爬虫实例，供监控使用
+                self.spider = spider
+                
                 if spider:
                     # 根据速度模式调整防反爬虫设置
                     if not self.enable_anti_crawler:
@@ -270,25 +273,31 @@ class MainWindow(QMainWindow):
         row1_layout.addWidget(self.keyword_edit)
         row1_layout.addStretch()
         
-        # 第二行：时间区间
-        row2_layout = QHBoxLayout()
+        # 时间范围区域
+        date_group = QGroupBox("时间范围")
+        date_layout = QHBoxLayout()
+        
+        # 添加时间过滤开关
+        self.time_filter_checkbox = QCheckBox("启用时间过滤")
+        self.time_filter_checkbox.setChecked(True)  # 默认启用
+        self.time_filter_checkbox.stateChanged.connect(self.on_time_filter_changed)
+        date_layout.addWidget(self.time_filter_checkbox)
+        
+        date_layout.addWidget(QLabel("开始日期："))
         self.start_date_edit = QDateEdit()
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-30))  # 默认30天前
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDisplayFormat('yyyy-MM-dd')
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
-        self.start_date_edit.dateChanged.connect(self.on_date_changed)  # 添加日期变化监听
+        self.start_date_edit.dateChanged.connect(self.on_date_changed)
+        date_layout.addWidget(self.start_date_edit)
         
+        date_layout.addWidget(QLabel("结束日期："))
         self.end_date_edit = QDateEdit()
+        self.end_date_edit.setDate(QDate.currentDate())  # 默认今天
         self.end_date_edit.setCalendarPopup(True)
-        self.end_date_edit.setDisplayFormat('yyyy-MM-dd')
-        self.end_date_edit.setDate(QDate.currentDate())
-        self.end_date_edit.dateChanged.connect(self.on_date_changed)  # 添加日期变化监听
+        self.end_date_edit.dateChanged.connect(self.on_date_changed)
+        date_layout.addWidget(self.end_date_edit)
         
-        row2_layout.addWidget(QLabel("起始日期："))
-        row2_layout.addWidget(self.start_date_edit)
-        row2_layout.addWidget(QLabel("结束日期："))
-        row2_layout.addWidget(self.end_date_edit)
-        row2_layout.addStretch()
+        date_group.setLayout(date_layout)
         
         # 第三行：检索说明和防反爬虫选项
         row3_layout = QHBoxLayout()
@@ -315,8 +324,15 @@ class MainWindow(QMainWindow):
         row3_layout.addWidget(QLabel("查询速度："))
         row3_layout.addWidget(self.speed_combo)
         
+        # 表格自动滚动选项
+        self.auto_scroll_checkbox = QCheckBox("表格自动滚动")
+        self.auto_scroll_checkbox.setChecked(True)
+        self.auto_scroll_checkbox.setToolTip("启用后表格会自动滚动到最新数据")
+        self.auto_scroll_checkbox.setStyleSheet("color: #666; font-size: 12px;")
+        row3_layout.addWidget(self.auto_scroll_checkbox)
+        
         query_layout.addLayout(row1_layout)
-        query_layout.addLayout(row2_layout)
+        query_layout.addWidget(date_group) # 添加时间范围组
         query_layout.addLayout(row3_layout)
         query_group.setLayout(query_layout)
 
@@ -524,6 +540,20 @@ class MainWindow(QMainWindow):
         """日期变化时自动切换到自定义模式"""
         self.mode_combo.setCurrentText("自定义模式 - 手动设置时间")
 
+    def on_time_filter_changed(self, state):
+        """时间过滤开关变化时的处理"""
+        if state == Qt.CheckState.Checked:
+            self.time_filter_checkbox.setText("启用时间过滤")
+            self.start_date_edit.setEnabled(True)
+            self.end_date_edit.setEnabled(True)
+        else:
+            self.time_filter_checkbox.setText("禁用时间过滤")
+            self.start_date_edit.setEnabled(False)
+            self.end_date_edit.setEnabled(False)
+            # 如果禁用时间过滤，则使用当前日期作为时间范围
+            self.start_date_edit.setDate(QDate.currentDate())
+            self.end_date_edit.setDate(QDate.currentDate())
+
     def on_smart_search(self):
         """智能查询：自动判断数据来源，一键获取最新结果"""
         # 如果正在搜索，则停止搜索
@@ -552,8 +582,13 @@ class MainWindow(QMainWindow):
                 keywords = keywords.split()
             
             # 获取时间区间参数
-            start_date = self.start_date_edit.date().toString('yyyy-MM-dd')
-            end_date = self.end_date_edit.date().toString('yyyy-MM-dd')
+            if self.time_filter_checkbox.isChecked():
+                start_date = self.start_date_edit.date().toString('yyyy-MM-dd')
+                end_date = self.end_date_edit.date().toString('yyyy-MM-dd')
+            else:
+                # 如果禁用时间过滤，则不传递时间参数
+                start_date = None
+                end_date = None
             
             # 检查是否需要爬取新数据
             db_results = db.search_policies(level, keywords, start_date, end_date)
@@ -589,6 +624,14 @@ class MainWindow(QMainWindow):
             if self.stats_label is not None:
                 self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
         
+        # 处理爬取统计信息
+        if "爬取完成统计:" in message:
+            # 这是一个统计信息的开始，可以特殊处理
+            pass
+        elif "总爬取数量:" in message or "过滤后数量:" in message or "最终保存数量:" in message:
+            # 这些是统计信息，可以高亮显示
+            pass
+        
         QApplication.processEvents()
     
     def update_results(self, results):
@@ -613,12 +656,13 @@ class MainWindow(QMainWindow):
             policy['pub_date'], 
             policy['source'], 
             policy['content'], 
-            policy['crawl_time']
+            policy['crawl_time'],
+            policy.get('category')  # 添加分类信息
         )
         
         # policy为dict，需转为tuple与表格结构一致
-        # 注意：数据库返回的字段顺序是 (id, level, title, pub_date, source, content)
-        row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'])
+        # 注意：数据库返回的字段顺序是 (id, level, title, pub_date, source, content, category)
+        row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
         self.current_data.append(row)
         
         # 实时显示：每一条都立即显示
@@ -749,6 +793,12 @@ class MainWindow(QMainWindow):
         row = self.table.rowCount()
         self.table.insertRow(row)
         self._set_table_row(row, item)
+        
+        # 自动滚动到最新行
+        if self.auto_scroll_checkbox.isChecked():
+            self.table.scrollToBottom()
+            # 选中最新行
+            self.table.selectRow(row)
     
     def _set_table_row(self, row, item):
         """设置表格行数据"""
@@ -756,12 +806,13 @@ class MainWindow(QMainWindow):
         
         # 检查item是元组还是字典
         if isinstance(item, (list, tuple)):
-            # 元组格式：(id, level, title, pub_date, source, content)
+            # 元组/列表格式 (id, level, title, pub_date, source, content)
             level = str(item[1]) if len(item) > 1 else ""
             title = str(item[2]) if len(item) > 2 else ""
             pub_date = str(item[3]) if len(item) > 3 else ""
             source = str(item[4]) if len(item) > 4 else ""
             content = str(item[5]) if len(item) > 5 else ""
+            category = str(item[6]) if len(item) > 6 else ""
         elif isinstance(item, dict):
             # 字典格式
             level = str(item.get('level', ''))
@@ -769,9 +820,10 @@ class MainWindow(QMainWindow):
             pub_date = str(item.get('pub_date', ''))
             source = str(item.get('source', ''))
             content = str(item.get('content', ''))
+            category = str(item.get('category', ''))
         else:
             # 未知格式，使用默认值
-            level = title = pub_date = source = content = ""
+            level = title = pub_date = source = content = category = ""
         
         # 机构列
         level_item = QTableWidgetItem(level)
@@ -795,8 +847,14 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 3, source_item)
         
         # 政策类型列
-        policy_types = self.compliance_analyzer.classify_policy(title, content)
-        type_item = QTableWidgetItem(", ".join(policy_types))
+        if level == '广东省人民政府' and category:
+            # 广东省政策显示分类信息
+            type_item = QTableWidgetItem(category)
+        else:
+            # 其他政策使用智能分类
+            policy_types = self.compliance_analyzer.classify_policy(title, content)
+            type_item = QTableWidgetItem(", ".join(policy_types))
+        
         type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table.setItem(row, 4, type_item)
         

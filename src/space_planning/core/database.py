@@ -37,9 +37,19 @@ def init_db():
             pub_date TEXT,
             source TEXT,
             content TEXT,
+            category TEXT,
             crawl_time TEXT
         )
     ''')
+    
+    # 检查是否需要添加category字段（数据库迁移）
+    try:
+        c.execute('SELECT category FROM policy LIMIT 1')
+    except sqlite3.OperationalError:
+        # category字段不存在，需要添加
+        print("正在添加category字段到现有数据库...")
+        c.execute('ALTER TABLE policy ADD COLUMN category TEXT')
+        print("category字段添加完成")
     
     # 创建全文检索表
     c.execute('''
@@ -61,7 +71,7 @@ def init_db():
     c.execute('''
         INSERT OR IGNORE INTO system_info (key, value, update_time) 
         VALUES (?, ?, ?)
-    ''', ('db_version', '1.0', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    ''', ('db_version', '2.0', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
     
     conn.commit()
     conn.close()
@@ -177,7 +187,7 @@ def should_backup_database():
         print(f"检查备份状态失败: {e}")
         return False
 
-def insert_policy(level, title, pub_date, source, content, crawl_time):
+def insert_policy(level, title, pub_date, source, content, crawl_time, category=None):
     """插入政策数据"""
     conn = None
     try:
@@ -189,9 +199,9 @@ def insert_policy(level, title, pub_date, source, content, crawl_time):
         if c.fetchone():
             return None
         
-        c.execute('''INSERT INTO policy (level, title, pub_date, source, content, crawl_time)
-                     VALUES (?, ?, ?, ?, ?, ?)''',
-                  (level, title, pub_date, source, content, crawl_time))
+        c.execute('''INSERT INTO policy (level, title, pub_date, source, content, category, crawl_time)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  (level, title, pub_date, source, content, category, crawl_time))
         rowid = c.lastrowid
         
         # 同步到FTS表
@@ -231,18 +241,18 @@ def search_policies(level=None, keywords=None, start_date=None, end_date=None):
             query = f"level:{level} AND ({' OR '.join(keywords)})"
         else:
             query = ' OR '.join(keywords)
-        sql = f'''SELECT p.id, p.level, p.title, p.pub_date, p.source, p.content 
+        sql = f'''SELECT p.id, p.level, p.title, p.pub_date, p.source, p.content, p.category 
                   FROM policy p JOIN policy_fts fts ON p.id = fts.rowid 
                   WHERE policy_fts MATCH ?{date_sql} ORDER BY p.pub_date DESC'''
         c.execute(sql, (query, *params))
     else:
         # 普通查询
         if level and level != "全部机构":
-            sql = f'''SELECT id, level, title, pub_date, source, content 
+            sql = f'''SELECT id, level, title, pub_date, source, content, category 
                       FROM policy p WHERE level = ?{date_sql} ORDER BY pub_date DESC'''
             c.execute(sql, (level, *params))
         else:
-            sql = f'''SELECT id, level, title, pub_date, source, content 
+            sql = f'''SELECT id, level, title, pub_date, source, content, category 
                       FROM policy p WHERE 1=1{date_sql} ORDER BY pub_date DESC'''
             c.execute(sql, (*params,))
     

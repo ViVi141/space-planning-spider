@@ -18,22 +18,35 @@ class StatusUpdateThread(QThread):
     status_signal = pyqtSignal(dict)
     error_signal = pyqtSignal(str)
     
-    def __init__(self, spider):
+    def __init__(self, spider, dialog=None):
         super().__init__()
         self.spider = spider
+        self.dialog = dialog
         self.running = True
     
     def run(self):
         """运行状态更新"""
         while self.running:
             try:
-                status = self.spider.get_crawler_status()
+                # 动态获取当前爬虫实例
+                current_spider = self.get_current_spider()
+                status = current_spider.get_crawler_status()
                 self.status_signal.emit(status)
             except Exception as e:
                 self.error_signal.emit(str(e))
             
             # 等待1秒后再次更新
             self.msleep(1000)
+    
+    def get_current_spider(self):
+        """获取当前爬虫实例"""
+        try:
+            # 尝试从对话框获取当前爬虫
+            if hasattr(self, 'dialog') and self.dialog:
+                return self.dialog.get_current_spider()
+            return self.spider
+        except:
+            return self.spider
     
     def stop(self):
         """停止线程"""
@@ -58,7 +71,18 @@ class CrawlerStatusDialog(QDialog):
         if parent and hasattr(parent, 'spider'):
             self.spider = parent.spider
         else:
-            self.spider = NationalSpider()
+            # 尝试从主窗口获取当前爬虫实例
+            if parent and hasattr(parent, 'search_thread') and parent.search_thread.isRunning():
+                # 如果正在搜索，尝试获取搜索线程中的爬虫
+                try:
+                    if hasattr(parent.search_thread, 'spider') and parent.search_thread.spider:
+                        self.spider = parent.search_thread.spider
+                    else:
+                        self.spider = NationalSpider()
+                except:
+                    self.spider = NationalSpider()
+            else:
+                self.spider = NationalSpider()
         self.status_thread = None
         self.auto_refresh = True
         self.refresh_interval = 2  # 默认2秒刷新一次
@@ -145,7 +169,7 @@ class CrawlerStatusDialog(QDialog):
     def start_status_update(self):
         """启动状态更新线程"""
         if self.status_thread is None or not self.status_thread.isRunning():
-            self.status_thread = StatusUpdateThread(self.spider)
+            self.status_thread = StatusUpdateThread(self.spider, self)
             self.status_thread.status_signal.connect(self.on_status_updated)
             self.status_thread.error_signal.connect(self.on_status_error)
             self.status_thread.start()
@@ -169,10 +193,13 @@ class CrawlerStatusDialog(QDialog):
     def update_status_display(self):
         """更新状态显示"""
         try:
+            # 尝试获取当前爬虫实例
+            current_spider = self.get_current_spider()
+            
             if hasattr(self, 'current_status'):
                 status = self.current_status
             else:
-                status = self.spider.get_crawler_status()
+                status = current_spider.get_crawler_status()
             
             # 格式化状态信息
             status_info = self.format_status_info(status)
@@ -180,6 +207,22 @@ class CrawlerStatusDialog(QDialog):
             
         except Exception as e:
             self.status_text.setPlainText(f"获取状态失败: {str(e)}")
+    
+    def get_current_spider(self):
+        """获取当前爬虫实例"""
+        try:
+            # 首先尝试从主窗口获取当前搜索线程中的爬虫
+            parent = self.parent()
+            if parent and hasattr(parent, 'search_thread'):
+                search_thread = getattr(parent, 'search_thread', None)
+                if search_thread and hasattr(search_thread, 'isRunning') and search_thread.isRunning():
+                    if hasattr(search_thread, 'spider'):
+                        return search_thread.spider
+            
+            # 如果搜索线程中没有，使用默认爬虫
+            return self.spider
+        except:
+            return self.spider
     
     def format_status_info(self, status):
         """格式化状态信息"""
