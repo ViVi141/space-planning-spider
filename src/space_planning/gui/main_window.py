@@ -28,6 +28,7 @@ class SearchThread(QThread):
     single_policy_signal = pyqtSignal(object)  # 新增单条政策
     finished_signal = pyqtSignal()     # 完成信号
     error_signal = pyqtSignal(str)     # 错误信号
+    data_count_signal = pyqtSignal(int)  # 数据量信号
     
     def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None):
         super().__init__()
@@ -96,6 +97,7 @@ class SearchThread(QThread):
                                     'pub_date': data_parts[1],
                                     'source': data_parts[2],
                                     'content': data_parts[3],
+                                    'category': data_parts[4] if len(data_parts) > 4 else None,  # 添加分类字段
                                     'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                                 }
                                 # 立即发送到界面
@@ -103,43 +105,34 @@ class SearchThread(QThread):
                         else:
                             self.progress_signal.emit(f"爬取进度: {message}")
                     
-                    new_policies = spider.crawl_policies(
-                        keywords=self.keywords,
-                        callback=progress_callback,
-                        start_date=self.start_date,
-                        end_date=self.end_date,
-                        speed_mode=self.speed_mode,
-                        disable_speed_limit=not self.enable_anti_crawler,
-                        stop_callback=lambda: self.stop_flag
-                    )
+                    # 调用爬虫方法
+                    if self.level == "广东省人民政府":
+                        # 广东省爬虫使用优化方法
+                        new_policies = getattr(spider, 'crawl_policies_optimized', spider.crawl_policies)(
+                            keywords=self.keywords,
+                            callback=progress_callback,
+                            start_date=self.start_date,
+                            end_date=self.end_date,
+                            speed_mode=self.speed_mode,
+                            disable_speed_limit=not self.enable_anti_crawler,
+                            stop_callback=lambda: self.stop_flag
+                        )
+                    else:
+                        # 其他爬虫使用标准方法
+                        new_policies = spider.crawl_policies(
+                            keywords=self.keywords,
+                            callback=progress_callback,
+                            start_date=self.start_date,
+                            end_date=self.end_date,
+                            speed_mode=self.speed_mode,
+                            disable_speed_limit=not self.enable_anti_crawler,
+                            stop_callback=lambda: self.stop_flag
+                        )
                 else:
                     new_policies = []
                 
-                # 实时保存和显示数据（在爬取过程中已经完成）
-                # 这里只需要处理停止后的数据保存
-                if new_policies and not self.stop_flag:
-                    for i, policy in enumerate(new_policies):
-                        # 检查policy是字典还是元组
-                        if isinstance(policy, dict):
-                            db.insert_policy(
-                                policy['level'], 
-                                policy['title'], 
-                                policy['pub_date'], 
-                                policy['source'], 
-                                policy['content'], 
-                                policy['crawl_time']
-                            )
-                        elif isinstance(policy, (list, tuple)) and len(policy) >= 6:
-                            # 如果是元组格式：(id, level, title, pub_date, source, content)
-                            db.insert_policy(
-                                policy[1],  # level
-                                policy[2],  # title
-                                policy[3],  # pub_date
-                                policy[4],  # source
-                                policy[5],  # content
-                                datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # crawl_time
-                            )
-                
+                # 注意：实时保存和显示数据已经在爬取过程中通过single_policy_signal完成
+                # 这里不需要再次保存，避免重复保存
                 if not self.stop_flag:
                     self.progress_signal.emit(f"爬取完成，共获取 {len(new_policies)} 条新数据")
                 else:
@@ -150,9 +143,13 @@ class SearchThread(QThread):
             else:
                 self.progress_signal.emit("数据库数据充足，无需爬取新数据")
             
-            # 最终查询结果
+            # 最终查询结果 - 重新查询数据库以获取所有数据（包括新爬取的）
             final_results = db.search_policies(self.level, self.keywords, self.start_date, self.end_date)
             self.result_signal.emit(final_results)
+            
+            # 发送数据量信号
+            self.data_count_signal.emit(len(final_results))
+            
             self.finished_signal.emit()
             
         except Exception as e:
@@ -608,6 +605,7 @@ class MainWindow(QMainWindow):
             self.search_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接
             self.search_thread.finished_signal.connect(self.search_finished)
             self.search_thread.error_signal.connect(self.search_error)
+            self.search_thread.data_count_signal.connect(self.on_data_count_update) # 连接数据量信号
             self.search_thread.start()
             
         except Exception as e:
@@ -636,6 +634,20 @@ class MainWindow(QMainWindow):
     
     def update_results(self, results):
         """实时更新结果表格"""
+        # 检查是否是最终查询结果（爬取完成后的查询）
+        # 如果是最终查询，且当前数据量大于查询结果，说明有实时爬取的数据
+        if len(self.current_data) > len(results) and len(self.current_data) > 0:
+            print(f"检测到实时爬取数据，当前数据量: {len(self.current_data)}, 查询结果: {len(results)}")
+            print("保留实时爬取的数据，不覆盖")
+            # 保留实时爬取的数据，不覆盖
+            return
+        
+        # 如果是初始查询（没有实时数据），则正常更新
+        if len(self.current_data) == 0:
+            print(f"初始查询结果: {len(results)} 条")
+        else:
+            print(f"更新查询结果: 当前 {len(self.current_data)} 条 -> 新结果 {len(results)} 条")
+        
         # 限制最大显示数量，避免内存占用过高
         max_display = 1000
         if len(results) > max_display:
@@ -649,31 +661,55 @@ class MainWindow(QMainWindow):
     
     def on_new_policy(self, policy):
         """新增政策信号处理"""
-        # 立即保存到数据库
-        db.insert_policy(
-            policy['level'], 
-            policy['title'], 
-            policy['pub_date'], 
-            policy['source'], 
-            policy['content'], 
-            policy['crawl_time'],
-            policy.get('category')  # 添加分类信息
-        )
-        
-        # policy为dict，需转为tuple与表格结构一致
-        # 注意：数据库返回的字段顺序是 (id, level, title, pub_date, source, content, category)
-        row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
-        self.current_data.append(row)
-        
-        # 实时显示：每一条都立即显示
-        self._add_single_row(row)
-        
-        # 更新统计信息
-        if self.stats_label is not None:
-            self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
-        
-        # 强制刷新界面
-        QApplication.processEvents()
+        try:
+            # 立即保存到数据库
+            db.insert_policy(
+                policy['level'], 
+                policy['title'], 
+                policy['pub_date'], 
+                policy['source'], 
+                policy['content'], 
+                policy['crawl_time'],
+                policy.get('category')  # 添加分类信息
+            )
+            
+            # policy为dict，需转为tuple与表格结构一致
+            # 注意：数据库返回的字段顺序是 (id, level, title, pub_date, source, content, category)
+            row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
+            self.current_data.append(row)
+            
+            # 实时显示：每一条都立即显示
+            self._add_single_row(row)
+            
+            # 更新统计信息
+            if self.stats_label is not None:
+                self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
+            
+            # 强制刷新界面
+            QApplication.processEvents()
+            
+        except Exception as e:
+            print(f"保存新政策失败: {e}")
+            # 即使保存失败，也要显示在界面上
+            try:
+                row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
+                self.current_data.append(row)
+                self._add_single_row(row)
+                
+                if self.stats_label is not None:
+                    self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
+                
+                QApplication.processEvents()
+            except Exception as e2:
+                print(f"显示新政策失败: {e2}")
+
+    def on_data_count_update(self, count):
+        """接收数据量更新信号"""
+        print(f"收到数据量更新信号: {count}")
+        # 如果当前数据量小于接收到的数量，说明有新的数据
+        if len(self.current_data) < count:
+            print(f"数据量不匹配，当前: {len(self.current_data)}, 接收: {count}")
+            # 可以选择重新查询数据库或保持当前状态
 
     def search_finished(self):
         """搜索完成"""
@@ -682,10 +718,11 @@ class MainWindow(QMainWindow):
         self.search_btn.setText("🔍 智能查询")
         self.search_btn.setEnabled(True)
         
-        # 显示结果统计
+        # 显示结果统计 - 使用实际的数据量
+        actual_count = len(self.current_data)
         QMessageBox.information(self, "查询完成", 
             f"🎉 智能查询完成！\n\n"
-            f"📊 共找到 {len(self.current_data)} 条政策")
+            f"📊 共找到 {actual_count} 条政策")
     
     def search_error(self, error_msg):
         """搜索出错"""
@@ -847,9 +884,14 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 3, source_item)
         
         # 政策类型列
-        if level == '广东省人民政府' and category:
+        if level == '广东省人民政府':
             # 广东省政策显示分类信息
-            type_item = QTableWidgetItem(category)
+            if category and category.strip():
+                type_item = QTableWidgetItem(category)
+            else:
+                # 如果分类为空，使用智能分类
+                policy_types = self.compliance_analyzer.classify_policy(title, content)
+                type_item = QTableWidgetItem(", ".join(policy_types))
         else:
             # 其他政策使用智能分类
             policy_types = self.compliance_analyzer.classify_policy(title, content)
@@ -1294,9 +1336,14 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.0.0\n"
+            "版本: 2.1.0\n"
+            "更新时间: 2025.7.8\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
+            "本次更新:\n"
+            "• 修复广东省爬虫分类显示问题\n"
+            "• 优化政策类型字段显示逻辑\n"
+            "• 完善数据传递机制\n\n"
             "防反爬虫功能已启用，包含:\n"
             "• 随机User-Agent轮换\n"
             "• 请求频率限制\n"
