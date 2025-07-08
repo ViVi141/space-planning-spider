@@ -9,9 +9,8 @@ import re
 import urllib3
 import warnings
 
-# 禁用SSL警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-warnings.filterwarnings('ignore', message='Unverified HTTPS request')
+# 启用SSL安全验证
+# 移除SSL警告禁用，确保安全连接
 
 from space_planning.core import database as db
 from space_planning.spider.national import NationalSpider
@@ -107,8 +106,9 @@ class SearchThread(QThread):
                     
                     # 调用爬虫方法
                     if self.level == "广东省人民政府":
-                        # 广东省爬虫使用优化方法
-                        new_policies = getattr(spider, 'crawl_policies_optimized', spider.crawl_policies)(
+                        # 广东省爬虫使用快速方法（跳过分类遍历，大幅提升速度）
+                        new_policies = getattr(spider, 'crawl_policies_fast', 
+                                              getattr(spider, 'crawl_policies_optimized', spider.crawl_policies))(
                             keywords=self.keywords,
                             callback=progress_callback,
                             start_date=self.start_date,
@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         self.max_display_rows = 100  # 最大显示100行
         self.page_size = 50  # 每页50行
         self.current_page = 0  # 当前页码
-        self.setWindowTitle("空间规划政策合规性分析系统")
+        self.setWindowTitle("空间规划政策合规性分析系统 v2.1.2 - ViVi141")
         
         # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(__file__), "../../../docs/icon.ico")
@@ -1335,21 +1335,24 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.1.0\n"
+            "版本: 2.1.1\n"
             "更新时间: 2025.7.8\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
+            "开发者: ViVi141\n"
+            "联系邮箱: 747384120@qq.com\n\n"
             "本次更新:\n"
             "• 修复广东省爬虫分类显示问题\n"
             "• 优化政策类型字段显示逻辑\n"
-            "• 完善数据传递机制\n\n"
+            "• 完善数据传递机制\n"
+            "• 移除授权限制，完全开放使用\n\n"
             "防反爬虫功能已启用，包含:\n"
             "• 随机User-Agent轮换\n"
             "• 请求频率限制\n"
             "• 智能延迟控制\n"
             "• 错误监控与重试\n"
             "• 会话轮换机制\n"
-            "• SSL证书验证禁用")
+            "• SSL证书安全验证")
     
 
     

@@ -19,8 +19,8 @@ from urllib.parse import urljoin, urlparse
 import urllib3
 import hashlib
 
-# 禁用SSL警告
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# 启用SSL安全验证
+# 移除SSL警告禁用，确保安全连接
 
 from .anti_crawler import AntiCrawlerManager, RequestRateLimiter
 from .monitor import CrawlerMonitor
@@ -40,7 +40,8 @@ class GuangdongSpider:
         
         # 创建会话
         self.session = requests.Session()
-        self.session.verify = False
+        # 启用SSL证书验证，确保安全连接
+        self.session.verify = True
         
         # 设置基础请求头
         self.headers = {
@@ -1693,6 +1694,215 @@ class GuangdongSpider:
         
         if callback:
             callback(f"爬取完成！总爬取: {total_crawled} 条，过滤后: {total_filtered} 条，最终保存: {total_saved} 条")
+        
+        return unique_policies
+
+    def crawl_policies_fast(self, keywords=None, callback=None, start_date=None, end_date=None, 
+                           speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
+        """广东省政策快速爬取方法 - 跳过分类遍历，直接搜索"""
+        print(f"开始快速爬取广东省政策，关键词: {keywords}, 时间范围: {start_date} 至 {end_date}")
+        
+        # 解析时间范围
+        dt_start = None
+        dt_end = None
+        enable_time_filter = False
+        
+        if start_date and end_date:
+            try:
+                dt_start = datetime.strptime(start_date, '%Y-%m-%d')
+                dt_end = datetime.strptime(end_date, '%Y-%m-%d')
+                enable_time_filter = True
+                print(f"启用时间过滤: {start_date} 至 {end_date}")
+            except ValueError:
+                print(f"时间格式错误，禁用时间过滤")
+                enable_time_filter = False
+        else:
+            print("未设置时间范围，禁用时间过滤")
+            enable_time_filter = False
+        
+        # 统计信息
+        total_crawled = 0
+        total_filtered = 0
+        total_saved = 0
+        
+        # 设置速度模式 - 快速模式下使用更激进的设置
+        self.speed_mode = speed_mode
+        if disable_speed_limit:
+            delay_range = (0.0, 0.1)  # 几乎无延迟
+        elif speed_mode == "快速模式":
+            delay_range = (0.1, 0.3)
+        elif speed_mode == "慢速模式":
+            delay_range = (1.0, 2.0)
+        else:  # 正常速度
+            delay_range = (0.2, 0.5)
+        
+        all_policies = []
+        
+        # 直接使用最有效的搜索策略，跳过分类遍历
+        print("使用快速搜索策略...")
+        if callback:
+            callback("使用快速搜索策略...")
+        
+        # 策略1：使用高级搜索表单（最有效）
+        try:
+            print("尝试高级搜索表单...")
+            if callback:
+                callback("尝试高级搜索表单...")
+            
+            # 使用更大的页面大小减少翻页次数
+            page_size = 50  # 增加页面大小
+            page_index = 1
+            max_pages = 50  # 减少最大页数
+            empty_page_count = 0
+            max_empty_pages = 3
+            
+            while page_index <= max_pages and empty_page_count < max_empty_pages:
+                if stop_callback and stop_callback():
+                    print("用户已停止爬取")
+                    break
+                
+                try:
+                    # 使用优化的搜索参数
+                    post_data = self._get_search_parameters(
+                        keywords=keywords,
+                        category_code=None,  # 不限制分类，搜索所有
+                        page_index=page_index,
+                        page_size=page_size,
+                        start_date=start_date,
+                        end_date=end_date,
+                        old_page_index=page_index - 1 if page_index > 1 else None
+                    )
+                    
+                    search_keyword = ' '.join(keywords) if keywords else ''
+                    print(f"快速搜索: '{search_keyword}', 页码: {page_index}")
+                    
+                    # 使用带翻页校验的请求方法
+                    resp = self._request_page_with_check(page_index, post_data, page_index - 1 if page_index > 1 else None)
+                    
+                    if not resp:
+                        print(f"第{page_index}页请求失败")
+                        break
+                    
+                    # 解析页面
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    
+                    # 使用优化的解析方法
+                    page_policies = self._parse_policy_list_optimized(soup, callback, stop_callback, "快速搜索")
+                    
+                    if len(page_policies) == 0:
+                        empty_page_count += 1
+                        print(f"第 {page_index} 页未获取到政策，连续空页: {empty_page_count}")
+                        if empty_page_count >= max_empty_pages:
+                            print(f"连续 {max_empty_pages} 页无数据，停止翻页")
+                            break
+                    else:
+                        empty_page_count = 0  # 重置空页计数
+                    
+                    # 更新总爬取数量
+                    total_crawled += len(page_policies)
+                    
+                    if callback:
+                        callback(f"第 {page_index} 页获取 {len(page_policies)} 条政策（累计爬取: {total_crawled} 条）")
+                    
+                    # 过滤关键词、时间并发送政策数据信号
+                    filtered_policies = []
+                    for policy in page_policies:
+                        # 关键词过滤
+                        if keywords and not self._is_policy_match_keywords(policy, keywords):
+                            continue
+                        
+                        # 时间过滤
+                        if enable_time_filter:
+                            if self._is_policy_in_date_range(policy, dt_start, dt_end):
+                                filtered_policies.append(policy)
+                                # 发送政策数据信号
+                                if callback:
+                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                        else:
+                            # 不启用时间过滤，直接包含所有政策
+                            filtered_policies.append(policy)
+                            # 发送政策数据信号
+                            if callback:
+                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                    
+                    # 更新过滤后数量
+                    total_filtered += len(filtered_policies)
+                    
+                    if callback:
+                        if enable_time_filter:
+                            callback(f"第 {page_index} 页过滤后保留 {len(filtered_policies)} 条政策（累计过滤后: {total_filtered} 条）")
+                        else:
+                            callback(f"第 {page_index} 页保留 {len(filtered_policies)} 条政策（累计: {total_filtered} 条）")
+                    
+                    all_policies.extend(filtered_policies)
+                    
+                    # 检查是否到达最大页数
+                    if page_index >= max_pages:
+                        print(f"已到达最大页数限制 ({max_pages} 页)，停止翻页")
+                        break
+                    
+                    page_index += 1
+                    
+                    # 添加延时（快速模式下延迟更短）
+                    if not disable_speed_limit:
+                        delay = random.uniform(*delay_range)
+                        time.sleep(delay)
+                        
+                except Exception as e:
+                    print(f"请求失败: {e}")
+                    import traceback
+                    print(f"详细错误信息: {traceback.format_exc()}")
+                    self.monitor.record_request(self.search_url, success=False, error_type=str(e))
+                    
+                    # 如果是网络相关错误，尝试重试
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                        print(f"检测到网络错误，等待3秒后重试...")
+                        if callback:
+                            callback(f"网络错误，等待重试...")
+                        time.sleep(3)
+                        continue
+                    
+                    # 如果是反爬虫相关错误，增加延时
+                    if "403" in str(e) or "429" in str(e) or "block" in str(e).lower():
+                        print(f"检测到反爬虫限制，等待5秒后重试...")
+                        if callback:
+                            callback(f"检测到访问限制，等待重试...")
+                        time.sleep(5)
+                        continue
+                    
+                    # 其他错误，记录并继续
+                    print(f"未知错误，跳过当前页面")
+                    if callback:
+                        callback(f"页面处理出错，跳过继续...")
+                    break
+            
+            print(f"快速搜索完成，共获取 {len(all_policies)} 条政策")
+            if callback:
+                callback(f"快速搜索完成，共获取 {len(all_policies)} 条政策")
+                
+        except Exception as e:
+            print(f"快速搜索策略失败: {e}")
+            if callback:
+                callback(f"快速搜索策略失败，尝试备用策略...")
+        
+        # 应用去重机制
+        print("应用数据去重...")
+        if callback:
+            callback("应用数据去重...")
+        
+        unique_policies = self._deduplicate_policies(all_policies)
+        
+        # 最终统计
+        total_saved = len(unique_policies)
+        
+        print(f"快速爬取完成统计:")
+        print(f"  总爬取数量: {total_crawled} 条")
+        print(f"  过滤后数量: {total_filtered} 条")
+        print(f"  最终保存数量: {total_saved} 条")
+        print(f"  去重率: {(len(all_policies) - len(unique_policies)) / len(all_policies) * 100:.1f}%" if all_policies else "0%")
+        
+        if callback:
+            callback(f"快速爬取完成！共获取 {total_saved} 条政策")
         
         return unique_policies
 

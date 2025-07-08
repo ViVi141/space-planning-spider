@@ -26,13 +26,13 @@ class AntiCrawlerManager:
         self.session = requests.Session()
         self.lock = threading.Lock()
         
-        # 配置SSL
+        # 配置SSL - 安全优先
         self.session.verify = certifi.where()
         
-        # 创建自定义SSL上下文
+        # 创建安全的SSL上下文
         self.ssl_context = ssl.create_default_context(cafile=certifi.where())
-        self.ssl_context.check_hostname = False
-        self.ssl_context.verify_mode = ssl.CERT_NONE
+        self.ssl_context.check_hostname = True  # 启用主机名验证
+        self.ssl_context.verify_mode = ssl.CERT_REQUIRED  # 要求证书验证
         
         # 请求频率控制 - 优化速度
         self.min_delay = 0.2  # 最小延迟（秒）
@@ -165,12 +165,11 @@ class AntiCrawlerManager:
         if 'timeout' not in kwargs:
             kwargs['timeout'] = 15
         
-        # 网络环境兼容性配置
-        # 1. 尝试不同的SSL验证策略
+        # 安全优先的SSL验证策略
+        # 只使用安全的SSL验证方式
         ssl_strategies = [
-            {'verify': certifi.where()},  # 使用certifi证书
+            {'verify': certifi.where()},  # 使用certifi证书（推荐）
             {'verify': True},             # 系统默认证书
-            {'verify': False}             # 禁用SSL验证（最后选择）
         ]
         
         # 2. 尝试不同的代理配置
@@ -193,10 +192,10 @@ class AntiCrawlerManager:
                         request_kwargs['allow_redirects'] = True
                         request_kwargs['stream'] = False
                         
-                        # 设置更宽松的SSL配置
+                        # 确保SSL安全验证
                         if not request_kwargs.get('verify', True):
-                            import urllib3
-                            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                            print("警告: 检测到不安全的SSL配置，已跳过")
+                            continue
                         
                         response = self.session.request(method, url, **request_kwargs)
                         

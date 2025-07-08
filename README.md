@@ -1,7 +1,9 @@
 # 空间规划政策爬虫与合规性分析系统
 
-**版本：v2.1.1**  
-**更新时间：2025.7.8**
+**版本：2.1.2**  
+**发布日期：2025.7.8**  
+**开发者：ViVi141**  
+**联系邮箱：747384120@qq.com**
 
 ## 📋 项目简介
 
@@ -372,9 +374,10 @@ space-planning-spider/
 
 ## 📞 联系方式
 
-- 项目地址：https://gitee.com/ViVi141/space-planning-spider
-- 问题反馈：请在Gitee上提交Issue
-- 邮箱联系：请通过Gitee私信联系
+- **开发者**：ViVi141
+- **联系邮箱**：747384120@qq.com
+- **项目地址**：https://gitee.com/ViVi141/space-planning-spider
+- **问题反馈**：请在Gitee上提交Issue或直接发送邮件
 
 ---
 
