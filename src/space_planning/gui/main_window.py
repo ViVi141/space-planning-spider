@@ -1264,53 +1264,52 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.warning(self, "错误", "无法访问系统剪贴板")
         elif col == 5:  # 点击"查看全文"列
-            if content:
-                # 处理文本内容，确保正确显示
-                if self.full_text is not None:
-                    # 清理文本内容，移除多余的空白字符
-                    cleaned_content = content.strip()
-                    # 替换多个连续换行为单个换行
-                    import re
-                    cleaned_content = re.sub(r'\n\s*\n', '\n\n', cleaned_content)
-                    # 确保文本有足够的换行
-                    if '\n' not in cleaned_content:
-                        # 如果文本很长但没有换行，尝试按句号分割
-                        cleaned_content = re.sub(r'([。！？；])', r'\1\n', cleaned_content)
-                    
-                    # 设置文本内容
-                    self.full_text.setPlainText(cleaned_content)
-                    
-                    # 强制更新布局
-                    self.full_text.updateGeometry()
-                    
-                    # 滚动到顶部
-                    cursor = self.full_text.textCursor()
-                    cursor.movePosition(cursor.Start)
-                    self.full_text.setTextCursor(cursor)
-                    
-                    # 确保文本可见并强制刷新
-                    self.full_text.ensureCursorVisible()
-                    self.full_text.repaint()
-                    
-                    # 强制处理事件
-                    QApplication.processEvents()
-                
-                # 更新标题
-                if self.full_text_title is not None:
-                    self.full_text_title.setText(f"正在查看：{title}")
-                
-                # 滚动到全文区域并设置焦点
-                if self.full_text is not None:
-                    self.full_text.setFocus()
-                
-                # 重新设置该行的样式，确保来源列保持超链接样式
-                self._set_table_row(row, self.current_data[row])
+            if content and content.strip() and content.strip() != "点击查看":
+                self._show_full_text(title, content)
             else:
-                # 静默处理，不显示弹窗
-                if self.full_text is not None:
-                    self.full_text.setPlainText("该政策暂无全文内容")
-                if self.full_text_title is not None:
-                    self.full_text_title.setText("暂无内容")
+                # 动态抓取正文
+                self._show_full_text(title, "正在获取政策正文，请稍候...")
+                def fetch_content(item=item, row=row):
+                    try:
+                        from space_planning.spider.guangdong import GuangdongSpider
+                        spider = GuangdongSpider()
+                        detail = spider.get_policy_detail(source)
+                        if not detail:
+                            detail = "未获取到政策正文"
+                    except Exception as e:
+                        detail = f"获取政策正文失败: {e}"
+                    def update():
+                        self._show_full_text(title, detail)
+                        # 更新内存中的数据，避免重复抓取
+                        if isinstance(item, dict):
+                            item['content'] = detail
+                        elif isinstance(item, (list, tuple)) and len(item) > 5:
+                            item2 = list(item)
+                            item2[5] = detail
+                            self.current_data[row] = tuple(item2)
+                    QTimer.singleShot(0, update)
+                threading.Thread(target=fetch_content, daemon=True).start()
+
+    def _show_full_text(self, title, content):
+        """显示政策全文到右侧全文区"""
+        if self.full_text is not None:
+            cleaned_content = content.strip()
+            import re
+            cleaned_content = re.sub(r'\n\s*\n', '\n\n', cleaned_content)
+            if '\n' not in cleaned_content:
+                cleaned_content = re.sub(r'([。！？；])', r'\1\n', cleaned_content)
+            self.full_text.setPlainText(cleaned_content)
+            self.full_text.updateGeometry()
+            cursor = self.full_text.textCursor()
+            cursor.movePosition(cursor.Start)
+            self.full_text.setTextCursor(cursor)
+            self.full_text.ensureCursorVisible()
+            self.full_text.repaint()
+            QApplication.processEvents()
+        if self.full_text_title is not None:
+            self.full_text_title.setText(f"正在查看：{title}")
+        if self.full_text is not None:
+            self.full_text.setFocus()
     
     def show_crawler_status(self):
         """显示爬虫状态实时监控"""

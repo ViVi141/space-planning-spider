@@ -137,19 +137,37 @@ class GuangdongSpider:
             return None
     
     def _get_all_categories(self):
-        """获取所有分类信息 - 基于网站结构分析结果"""
-        # 基于HTML分析，使用实际的分类参数
+        """获取所有分类信息 - 基于网站层级结构分析结果"""
+        # 基于网站导航结构，使用父级和子级分类
         categories = [
-            # 使用网站实际的分类代码
-            ("省级地方性法规", "XM0701"),
-            ("设区的市地方性法规", "XM0702"), 
-            ("经济特区法规", "XM0703"),
-            ("自治条例和单行条例", "XU13"),
-            ("省级地方政府规章", "XO0802"),
-            ("设区的市地方政府规章", "XO0803"),
-            ("地方规范性文件", "XP08"),
+            # 父级分类：广东地方性法规 (/dfxfg/)
+            ("地方性法规", "XM07", [
+                ("省级地方性法规", "XM0701"),
+                ("设区的市地方性法规", "XM0702"), 
+                ("经济特区法规", "XM0703"),
+                ("自治条例和单行条例", "XU13"),
+            ]),
+            
+            # 父级分类：广东地方政府规章 (/dfzfgz/)
+            ("地方政府规章", "XO08", [
+                ("省级地方政府规章", "XO0802"),
+                ("设区的市地方政府规章", "XO0803"),
+            ]),
+            
+            # 父级分类：广东规范性文件 (/fljs/)
+            ("规范性文件", "XP08", [
+                ("地方规范性文件", "XP08"),
+            ]),
         ]
         return categories
+    
+    def _get_flat_categories(self):
+        """获取扁平化的分类列表（兼容旧版本）"""
+        flat_categories = []
+        for parent_name, parent_code, sub_categories in self._get_all_categories():
+            for sub_name, sub_code in sub_categories:
+                flat_categories.append((sub_name, sub_code))
+        return flat_categories
     
     def _get_search_parameters(self, keywords=None, category_code=None, page_index=1, page_size=20, start_date=None, end_date=None, old_page_index=None):
         """获取搜索参数 - 基于网站表单分析结果"""
@@ -373,8 +391,8 @@ class GuangdongSpider:
         else:  # 正常速度
             delay_range = (1, 2)
         
-        # 获取所有分类
-        categories = self._get_all_categories()
+        # 获取所有分类（使用扁平化列表）
+        categories = self._get_flat_categories()
         print(f"找到 {len(categories)} 个分类")
         
         all_policies = []
@@ -1123,15 +1141,53 @@ class GuangdongSpider:
             
             soup = BeautifulSoup(resp.content, 'html.parser')
             
-            # 提取正文内容
-            content_div = soup.find('div', class_='content') or \
-                         soup.find('div', class_='article-content') or \
-                         soup.find('div', class_='text')
+            # 尝试多种方式提取正文内容
+            content = ""
             
-            if content_div:
-                return content_div.get_text(strip=True)  # type: ignore
-            else:
-                return soup.get_text(strip=True)  # type: ignore
+            # 方法1：查找常见的正文容器
+            content_selectors = [
+                'div.content',
+                'div.article-content', 
+                'div.text',
+                'div.article',
+                'div.main-content',
+                'div.detail-content',
+                'div.policy-content',
+                'div.law-content'
+            ]
+            
+            for selector in content_selectors:
+                content_div = soup.select_one(selector)
+                if content_div:
+                    content = content_div.get_text(strip=True)
+                    if content and len(content) > 100:  # 确保内容足够长
+                        print(f"使用选择器 '{selector}' 获取到正文")
+                        break
+            
+            # 方法2：如果方法1失败，尝试查找包含政策文本的div
+            if not content or len(content) < 100:
+                for div in soup.find_all('div'):
+                    text = div.get_text(strip=True)
+                    if (text and len(text) > 200 and 
+                        ('第一条' in text or '第一章' in text or '总则' in text or 
+                         '条' in text or '款' in text or '项' in text)):
+                        content = text
+                        print("通过关键词匹配获取到正文")
+                        break
+            
+            # 方法3：如果还是失败，返回页面主要内容
+            if not content or len(content) < 100:
+                # 移除导航、页脚等无关内容
+                for tag in soup.find_all(['nav', 'header', 'footer', 'script', 'style']):
+                    tag.decompose()
+                
+                content = soup.get_text(strip=True)
+                if content:
+                    # 清理多余空白字符
+                    content = re.sub(r'\s+', ' ', content)
+                    print("使用页面主要内容作为正文")
+            
+            return content
         
         except Exception as e:
             # 记录失败的详情页面请求
@@ -1340,7 +1396,24 @@ class GuangdongSpider:
             # 解析信息
             validity, document_number, publish_date, effective_date = self._parse_policy_info(info_text)
             
-            # 构建政策数据 - 使用分类名称作为政策类型
+            # 获取政策正文内容
+            content = ""
+            if link:
+                try:
+                    print(f"正在获取政策正文: {title}")
+                    content = self.get_policy_detail(link)
+                    if content:
+                        print(f"成功获取正文，长度: {len(content)} 字符")
+                    else:
+                        print(f"未获取到正文内容")
+                except Exception as e:
+                    print(f"获取政策正文失败: {e}")
+                    content = ""
+            
+            # 构建层级分类名称
+            full_category_name = self._get_full_category_name(category_name)
+            
+            # 构建政策数据 - 使用层级分类名称作为政策类型
             policy_data = {
                 'level': LEVEL_NAME,
                 'title': title,
@@ -1349,8 +1422,8 @@ class GuangdongSpider:
                 'validity': validity,
                 'effective_date': effective_date,
                 'source': link,
-                'content': info_text,
-                'category': category_name or "广东省政策",  # 直接使用分类名称作为政策类型
+                'content': content,  # 使用获取到的正文内容
+                'category': full_category_name or "广东省政策",  # 使用层级分类名称作为政策类型
                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
@@ -1401,6 +1474,21 @@ class GuangdongSpider:
         
         return validity, document_number, publish_date, effective_date
     
+    def _get_full_category_name(self, sub_category_name):
+        """获取完整的层级分类名称"""
+        if not sub_category_name:
+            return "广东省政策"
+        
+        # 查找子分类对应的父分类
+        for parent_name, parent_code, sub_categories in self._get_all_categories():
+            for sub_name, sub_code in sub_categories:
+                if sub_name == sub_category_name:
+                    # 返回 "父级分类 > 子级分类" 格式
+                    return f"{parent_name} > {sub_name}"
+        
+        # 如果没找到，返回原分类名称
+        return sub_category_name
+    
     def crawl_policies_optimized(self, keywords=None, callback=None, start_date=None, end_date=None, 
                                speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
         """优化的政策爬取方法"""
@@ -1438,8 +1526,8 @@ class GuangdongSpider:
         else:  # 正常速度
             delay_range = (1, 2)
         
-        # 获取所有分类
-        categories = self._get_all_categories()
+        # 获取所有分类（使用扁平化列表）
+        categories = self._get_flat_categories()
         print(f"找到 {len(categories)} 个分类")
         
         all_policies = []
@@ -1556,7 +1644,30 @@ class GuangdongSpider:
                         
                 except Exception as e:
                     print(f"请求失败: {e}")
+                    import traceback
+                    print(f"详细错误信息: {traceback.format_exc()}")
                     self.monitor.record_request(self.search_url, success=False, error_type=str(e))
+                    
+                    # 如果是网络相关错误，尝试重试
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                        print(f"检测到网络错误，等待5秒后重试...")
+                        if callback:
+                            callback(f"网络错误，等待重试...")
+                        time.sleep(5)
+                        continue
+                    
+                    # 如果是反爬虫相关错误，增加延时
+                    if "403" in str(e) or "429" in str(e) or "block" in str(e).lower():
+                        print(f"检测到反爬虫限制，等待10秒后重试...")
+                        if callback:
+                            callback(f"检测到访问限制，等待重试...")
+                        time.sleep(10)
+                        continue
+                    
+                    # 其他错误，记录并继续
+                    print(f"未知错误，跳过当前页面")
+                    if callback:
+                        callback(f"页面处理出错，跳过继续...")
                     break
             
             # 显示当前分类的统计信息
