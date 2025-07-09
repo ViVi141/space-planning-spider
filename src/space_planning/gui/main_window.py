@@ -420,9 +420,6 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)  # 允许文字换行
         
-        # 设置表格右键菜单
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.show_context_menu)
         
         # 设置行高
         vheader = self.table.verticalHeader()
@@ -1518,12 +1515,7 @@ class MainWindow(QMainWindow):
         """导出数据（菜单项）"""
         self.on_export()
 
-    def show_context_menu(self, pos):
-        """表格右键菜单"""
-        from PyQt5.QtWidgets import QMenu
-        menu = QMenu(self)
-        # PDF导出功能已移除
-        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
 
 def main():
     """主程序入口函数"""
