@@ -107,11 +107,12 @@ class GuangdongSpider:
             check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
             
             print(f"请求翻页校验接口: 第{page_index}页")
-            check_resp = self.session.post(check_url, headers=check_headers, timeout=30)
-            
-            if check_resp.status_code != 200:
-                print(f"翻页校验失败，状态码: {check_resp.status_code}")
-                return None
+            try:
+                check_resp = self.session.post(check_url, headers=check_headers, timeout=15)
+                print(f"翻页校验响应状态码: {check_resp.status_code}")
+            except Exception as check_error:
+                print(f"翻页校验请求失败: {check_error}")
+                # 翻页校验失败不影响主请求，继续执行
             
             # 2. 再请求数据接口
             search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
@@ -125,8 +126,11 @@ class GuangdongSpider:
             print(f"请求数据接口: 第{page_index}页")
             search_resp = self.session.post(search_url, data=search_params, headers=search_headers, timeout=30)
             
+            print(f"数据接口响应状态码: {search_resp.status_code}")
+            
             if search_resp.status_code == 200:
                 self.monitor.record_request(search_url, success=True)
+                print(f"第{page_index}页请求成功")
                 return search_resp
             else:
                 self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
@@ -135,6 +139,8 @@ class GuangdongSpider:
                 
         except Exception as e:
             print(f"页面请求异常: {e}")
+            import traceback
+            print(f"详细错误信息: {traceback.format_exc()}")
             return None
     
     def _get_all_categories(self):
@@ -1319,7 +1325,7 @@ class GuangdongSpider:
                         
                         # 发送政策数据信号
                         if callback:
-                            callback(f"获取政策: {policy_data.get('title', '未知标题')}")
+                            callback(f"POLICY_DATA:{policy_data.get('title', '')}|{policy_data.get('pub_date', '')}|{policy_data.get('source', '')}|{policy_data.get('content', '')}|{policy_data.get('category', '')}")
                             
             except Exception as e:
                 print(f"解析政策项目失败: {e}")
@@ -1775,12 +1781,16 @@ class GuangdongSpider:
                     
                     search_keyword = ' '.join(keywords) if keywords else ''
                     print(f"快速搜索: '{search_keyword}', 页码: {page_index}")
+                    if callback:
+                        callback(f"正在请求第 {page_index} 页...")
                     
                     # 使用带翻页校验的请求方法
                     resp = self._request_page_with_check(page_index, post_data, page_index - 1 if page_index > 1 else None)
                     
                     if not resp:
                         print(f"第{page_index}页请求失败")
+                        if callback:
+                            callback(f"第 {page_index} 页请求失败，停止翻页")
                         break
                     
                     # 解析页面
@@ -1804,7 +1814,7 @@ class GuangdongSpider:
                     if callback:
                         callback(f"第 {page_index} 页获取 {len(page_policies)} 条政策（累计爬取: {total_crawled} 条）")
                     
-                    # 过滤关键词、时间并发送政策数据信号
+                    # 过滤关键词、时间（信号已在_parse_policy_list_optimized中发送）
                     filtered_policies = []
                     for policy in page_policies:
                         # 关键词过滤
@@ -1815,15 +1825,9 @@ class GuangdongSpider:
                         if enable_time_filter:
                             if self._is_policy_in_date_range(policy, dt_start, dt_end):
                                 filtered_policies.append(policy)
-                                # 发送政策数据信号
-                                if callback:
-                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
                         else:
                             # 不启用时间过滤，直接包含所有政策
                             filtered_policies.append(policy)
-                            # 发送政策数据信号
-                            if callback:
-                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
                     
                     # 更新过滤后数量
                     total_filtered += len(filtered_policies)

@@ -3,6 +3,10 @@ from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import os
+import logging
+
+# 设置日志
+logger = logging.getLogger(__name__)
 
 def export_to_word(data, file_path):
     """导出政策数据到Word文档"""
@@ -156,4 +160,44 @@ class DataExporter:
             return True
         except Exception as e:
             print(f"导出文本文件失败: {e}")
-            return False 
+            return False
+    
+    def export_to_markdown(self, data, file_path):
+        """导出政策数据到Markdown文档"""
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write('# 空间规划政策汇总\n\n')
+                f.write(f'**共导出 {len(data)} 条政策文件**\n\n')
+                f.write('---\n\n')
+                
+                for i, policy in enumerate(data, 1):
+                    # 解析政策数据格式
+                    if isinstance(policy, (list, tuple)):
+                        title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                        level = str(policy[1]) if len(policy) > 1 else "未知层级"
+                        pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+                        source = str(policy[4]) if len(policy) > 4 else "未知来源"
+                        content = str(policy[5]) if len(policy) > 5 else "无内容"
+                    elif isinstance(policy, dict):
+                        title = str(policy.get('title', '未知标题'))
+                        level = str(policy.get('level', '未知层级'))
+                        pub_date = str(policy.get('pub_date', '未知日期'))
+                        source = str(policy.get('source', '未知来源'))
+                        content = str(policy.get('content', '无内容'))
+                    else:
+                        title = level = pub_date = source = content = "未知"
+                    
+                    f.write(f'## {i}. {title}\n\n')
+                    f.write(f'**层级：** {level}\n\n')
+                    f.write(f'**发布日期：** {pub_date}\n\n')
+                    f.write(f'**来源：** {source}\n\n')
+                    f.write(f'**正文：**\n\n')
+                    f.write(f'{content}\n\n')
+                    f.write('---\n\n')
+            
+            return True
+        except Exception as e:
+            print(f"导出Markdown文件失败: {e}")
+            return False
+    
+    # PDF导出功能已移除 

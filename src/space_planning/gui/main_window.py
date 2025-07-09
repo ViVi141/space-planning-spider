@@ -60,6 +60,9 @@ class SearchThread(QThread):
                 elif self.level == "广东省人民政府":
                     from space_planning.spider.guangdong import GuangdongSpider
                     spider = GuangdongSpider()
+                elif self.level == "自然资源部":
+                    from space_planning.spider.mnr import MNRSpider
+                    spider = MNRSpider()
                 elif self.level == "全部机构":
                     # 对于全部机构，默认使用国家级爬虫
                     from space_planning.spider.national import NationalSpider
@@ -165,7 +168,7 @@ class MainWindow(QMainWindow):
         self.max_display_rows = 100  # 最大显示100行
         self.page_size = 50  # 每页50行
         self.current_page = 0  # 当前页码
-        self.setWindowTitle("空间规划政策合规性分析系统 v2.1.2 - ViVi141")
+        self.setWindowTitle("空间规划政策合规性分析系统 v2.1.4 - ViVi141")
         
         # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(__file__), "../../../docs/icon.ico")
@@ -195,7 +198,7 @@ class MainWindow(QMainWindow):
         
         if file_menu is not None:
             # 文件菜单
-            export_action = QAction('导出数据', self)
+            export_action = QAction('导出数据 (Word/Excel/文本)', self)
             export_action.triggered.connect(self.export_data)
             file_menu.addAction(export_action)
         
@@ -259,7 +262,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"动态加载爬虫机构失败: {e}")
             # 降级方案：只显示已实现的爬虫
-            self.level_combo.addItems(["全部机构", "住房和城乡建设部", "广东省人民政府"])
+            self.level_combo.addItems(["全部机构", "住房和城乡建设部", "广东省人民政府", "自然资源部"])
         
         self.keyword_edit = QLineEdit()
         self.keyword_edit.setPlaceholderText("请输入项目关键词，如'控制性详细规划'、'建设用地'...")
@@ -417,6 +420,10 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)  # 允许文字换行
         
+        # 设置表格右键菜单
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_context_menu)
+        
         # 设置行高
         vheader = self.table.verticalHeader()
         if vheader is not None:
@@ -512,26 +519,35 @@ class MainWindow(QMainWindow):
 
     def on_mode_changed(self, mode_text):
         """预设模式改变时的处理"""
-        if "日常监控模式" in mode_text:
-            # 最近30天
-            self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
-            self.end_date_edit.setDate(QDate.currentDate())
-        elif "项目分析模式" in mode_text:
-            # 自定义时间，默认最近6个月
-            self.start_date_edit.setDate(QDate.currentDate().addMonths(-6))
-            self.end_date_edit.setDate(QDate.currentDate())
-        elif "历史补全模式" in mode_text:
-            # 完整时间段，默认最近2年
-            self.start_date_edit.setDate(QDate.currentDate().addYears(-2))
-            self.end_date_edit.setDate(QDate.currentDate())
-        elif "快速预览模式" in mode_text:
-            # 最近7天
-            self.start_date_edit.setDate(QDate.currentDate().addDays(-7))
-            self.end_date_edit.setDate(QDate.currentDate())
-        elif "自定义模式" in mode_text:
-            # 切换到自定义模式时，确保日期是当前日期
-            self.start_date_edit.setDate(QDate.currentDate())
-            self.end_date_edit.setDate(QDate.currentDate())
+        # 临时断开日期变化信号，避免触发模式切换
+        self.start_date_edit.dateChanged.disconnect(self.on_date_changed)
+        self.end_date_edit.dateChanged.disconnect(self.on_date_changed)
+        
+        try:
+            if "日常监控模式" in mode_text:
+                # 最近30天
+                self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
+                self.end_date_edit.setDate(QDate.currentDate())
+            elif "项目分析模式" in mode_text:
+                # 自定义时间，默认最近6个月
+                self.start_date_edit.setDate(QDate.currentDate().addMonths(-6))
+                self.end_date_edit.setDate(QDate.currentDate())
+            elif "历史补全模式" in mode_text:
+                # 完整时间段，默认最近2年
+                self.start_date_edit.setDate(QDate.currentDate().addYears(-2))
+                self.end_date_edit.setDate(QDate.currentDate())
+            elif "快速预览模式" in mode_text:
+                # 最近7天
+                self.start_date_edit.setDate(QDate.currentDate().addDays(-7))
+                self.end_date_edit.setDate(QDate.currentDate())
+            elif "自定义模式" in mode_text:
+                # 切换到自定义模式时，确保日期是当前日期
+                self.start_date_edit.setDate(QDate.currentDate())
+                self.end_date_edit.setDate(QDate.currentDate())
+        finally:
+            # 重新连接日期变化信号
+            self.start_date_edit.dateChanged.connect(self.on_date_changed)
+            self.end_date_edit.dateChanged.connect(self.on_date_changed)
 
     def on_date_changed(self):
         """日期变化时自动切换到自定义模式"""
@@ -908,18 +924,151 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 5, action_item)
 
     def on_export(self):
-        """导出为Word"""
+        """导出数据 - 支持政策选择和多种格式"""
         if not self.current_data:
             QMessageBox.warning(self, "警告", "没有数据可导出")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(self, "保存Word文件", "", "Word文档 (*.docx)")
-        if file_path:
-            try:
-                export_to_word(self.current_data, file_path)
-                QMessageBox.information(self, "成功", "Word文档导出成功！")
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+        # 创建政策选择和格式选择对话框
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QDialogButtonBox, QListWidget, QCheckBox, QGroupBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择政策和导出格式")
+        dialog.setModal(True)
+        dialog.resize(600, 500)
+        
+        layout = QVBoxLayout()
+        
+        # 政策选择区域
+        policy_group = QGroupBox("选择要导出的政策")
+        policy_layout = QVBoxLayout()
+        
+        # 全选复选框
+        select_all_checkbox = QCheckBox("全选")
+        policy_layout.addWidget(select_all_checkbox)
+        
+        # 政策列表
+        policy_list = QListWidget()
+        policy_list.setSelectionMode(QListWidget.MultiSelection)
+        
+        # 添加政策到列表
+        for i, policy in enumerate(self.current_data):
+            if isinstance(policy, (list, tuple)):
+                title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                level = str(policy[1]) if len(policy) > 1 else "未知机构"
+            elif isinstance(policy, dict):
+                title = str(policy.get('title', '未知标题'))
+                level = str(policy.get('level', '未知机构'))
+            else:
+                title = "未知标题"
+                level = "未知机构"
+            
+            policy_list.addItem(f"{i+1}. {title} ({level})")
+        
+        policy_layout.addWidget(policy_list)
+        policy_group.setLayout(policy_layout)
+        layout.addWidget(policy_group)
+        
+        # 格式选择区域
+        format_group = QGroupBox("选择导出格式")
+        format_layout = QVBoxLayout()
+        
+        format_layout.addWidget(QLabel("请选择导出格式："))
+        format_combo = QComboBox()
+        format_combo.addItems([
+            "Word文档 (*.docx)",
+            "Excel表格 (*.xlsx)", 
+            "文本文件 (*.txt)",
+            "Markdown文档 (*.md)"
+        ])
+        format_layout.addWidget(format_combo)
+        format_group.setLayout(format_layout)
+        layout.addWidget(format_group)
+        
+        # 按钮
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        dialog.setLayout(layout)
+        
+        # 全选功能
+        def on_select_all_changed(state):
+            if state:
+                for i in range(policy_list.count()):
+                    item = policy_list.item(i)
+                    if item:
+                        item.setSelected(True)
+            else:
+                policy_list.clearSelection()
+        
+        select_all_checkbox.stateChanged.connect(on_select_all_changed)
+        
+        if dialog.exec_() == QDialog.Accepted:
+            selected_format = format_combo.currentText()
+            selected_indices = [policy_list.row(item) for item in policy_list.selectedItems()]
+            
+            if not selected_indices:
+                QMessageBox.warning(self, "警告", "请至少选择一条政策")
+                return
+            
+            # 获取选中的政策数据
+            selected_policies = [self.current_data[i] for i in selected_indices]
+            
+            # 根据选择的格式设置文件过滤器
+            if "Word" in selected_format:
+                file_filter = "Word文档 (*.docx)"
+                default_ext = ".docx"
+            elif "Excel" in selected_format:
+                file_filter = "Excel表格 (*.xlsx)"
+                default_ext = ".xlsx"
+            elif "文本" in selected_format:
+                file_filter = "文本文件 (*.txt)"
+                default_ext = ".txt"
+            elif "Markdown" in selected_format:
+                file_filter = "Markdown文档 (*.md)"
+                default_ext = ".md"
+            else:
+                file_filter = "所有文件 (*.*)"
+                default_ext = ""
+            
+            file_path, _ = QFileDialog.getSaveFileName(self, "保存文件", f"政策数据{default_ext}", file_filter)
+            
+            if file_path:
+                try:
+                    from space_planning.utils.export import DataExporter
+                    exporter = DataExporter()
+                    
+                    if "Word" in selected_format:
+                        success = exporter.export_to_word(selected_policies, file_path)
+                        if success:
+                            QMessageBox.information(self, "成功", f"Word文档导出成功！共导出{len(selected_policies)}条政策")
+                        else:
+                            QMessageBox.critical(self, "错误", "Word文档导出失败")
+                    elif "Excel" in selected_format:
+                        success = exporter.export_to_excel(selected_policies, file_path)
+                        if success:
+                            QMessageBox.information(self, "成功", f"Excel表格导出成功！共导出{len(selected_policies)}条政策")
+                        else:
+                            QMessageBox.critical(self, "错误", "Excel表格导出失败，请确保已安装pandas和openpyxl库")
+                    elif "文本" in selected_format:
+                        success = exporter.export_to_txt(selected_policies, file_path)
+                        if success:
+                            QMessageBox.information(self, "成功", f"文本文件导出成功！共导出{len(selected_policies)}条政策")
+                        else:
+                            QMessageBox.critical(self, "错误", "文本文件导出失败")
+                    elif "Markdown" in selected_format:
+                        success = exporter.export_to_markdown(selected_policies, file_path)
+                        if success:
+                            QMessageBox.information(self, "成功", f"Markdown文档导出成功！共导出{len(selected_policies)}条政策")
+                        else:
+                            QMessageBox.critical(self, "错误", "Markdown文档导出失败")
+                    else:
+                        QMessageBox.warning(self, "警告", "不支持的导出格式")
+                        
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
 
     def on_batch_update(self):
         """批量爬取数据（不依赖关键词）"""
@@ -1271,8 +1420,17 @@ class MainWindow(QMainWindow):
                 self._show_full_text(title, "正在获取政策正文，请稍候...")
                 def fetch_content(item=item, row=row):
                     try:
-                        from space_planning.spider.guangdong import GuangdongSpider
-                        spider = GuangdongSpider()
+                        # 根据政策来源判断使用哪个爬虫
+                        if 'mnr.gov.cn' in source:
+                            from space_planning.spider.mnr import MNRSpider
+                            spider = MNRSpider()
+                        elif 'gd.gov.cn' in source:
+                            from space_planning.spider.guangdong import GuangdongSpider
+                            spider = GuangdongSpider()
+                        else:
+                            from space_planning.spider.national import NationalSpider
+                            spider = NationalSpider()
+                        
                         detail = spider.get_policy_detail(source)
                         if not detail:
                             detail = "未获取到政策正文"
@@ -1359,6 +1517,13 @@ class MainWindow(QMainWindow):
     def export_data(self):
         """导出数据（菜单项）"""
         self.on_export()
+
+    def show_context_menu(self, pos):
+        """表格右键菜单"""
+        from PyQt5.QtWidgets import QMenu
+        menu = QMenu(self)
+        # PDF导出功能已移除
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
 def main():
     """主程序入口函数"""
