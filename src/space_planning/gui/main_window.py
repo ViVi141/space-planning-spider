@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTableWidget, QTableWidgetItem, QTextEdit, QFileDialog, QMessageBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget, QRadioButton, QProgressBar, QDateEdit, QGroupBox, QCheckBox, QHeaderView)
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTableWidget, QTableWidgetItem, QTextEdit, QFileDialog, QMessageBox, QSpinBox, QDialog, QDialogButtonBox, QListWidget, QRadioButton, QProgressBar, QDateEdit, QGroupBox, QCheckBox, QHeaderView, QMenu)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QDate, QTimer
 from PyQt5.QtGui import QColor
 import sys
@@ -76,16 +76,23 @@ class SearchThread(QThread):
                 self.spider = spider
                 
                 if spider:
-                    # 根据速度模式调整防反爬虫设置
-                    if not self.enable_anti_crawler:
-                        self.progress_signal.emit("已禁用速度限制，使用最快速度（其他防反爬虫措施仍有效）")
-                    else:
-                        if self.speed_mode == "快速模式":
-                            self.progress_signal.emit("使用快速模式，可能被反爬虫检测")
-                        elif self.speed_mode == "慢速模式":
-                            self.progress_signal.emit("使用慢速模式，更安全但速度较慢")
+                    # 根据速度模式和防反爬虫设置调整爬虫行为
+                    if self.speed_mode == "快速模式":
+                        # 快速模式：优先速度，禁用大部分限制
+                        self.progress_signal.emit("🚀 快速模式：已禁用防反爬虫限制，优先速度")
+                        disable_speed_limit = True
+                    elif self.speed_mode == "慢速模式":
+                        # 慢速模式：优先安全，启用所有防反爬虫措施
+                        self.progress_signal.emit("🐌 慢速模式：已启用完整防反爬虫措施，优先安全")
+                        disable_speed_limit = False
+                    else:  # 正常速度
+                        # 正常模式：根据用户设置决定
+                        if not self.enable_anti_crawler:
+                            self.progress_signal.emit("⚡ 正常速度：已禁用速度限制")
+                            disable_speed_limit = True
                         else:
-                            self.progress_signal.emit("使用正常速度模式")
+                            self.progress_signal.emit("🛡️ 正常速度：已启用防反爬虫措施")
+                            disable_speed_limit = False
                     
                     # 自定义回调函数，实时更新进度和发送数据
                     def progress_callback(message):
@@ -117,7 +124,7 @@ class SearchThread(QThread):
                             start_date=self.start_date,
                             end_date=self.end_date,
                             speed_mode=self.speed_mode,
-                            disable_speed_limit=not self.enable_anti_crawler,
+                            disable_speed_limit=disable_speed_limit,
                             stop_callback=lambda: self.stop_flag
                         )
                     else:
@@ -128,7 +135,7 @@ class SearchThread(QThread):
                             start_date=self.start_date,
                             end_date=self.end_date,
                             speed_mode=self.speed_mode,
-                            disable_speed_limit=not self.enable_anti_crawler,
+                            disable_speed_limit=disable_speed_limit,
                             stop_callback=lambda: self.stop_flag
                         )
                 else:
@@ -194,6 +201,7 @@ class MainWindow(QMainWindow):
             
         file_menu: QMenu = menubar.addMenu('文件')
         tools_menu: QMenu = menubar.addMenu('工具')
+        settings_menu: QMenu = menubar.addMenu('设置')
         help_menu: QMenu = menubar.addMenu('帮助')
         
         if file_menu is not None:
@@ -214,6 +222,12 @@ class MainWindow(QMainWindow):
             tools_menu.addAction(db_action)
             
             # 清理数据库功能已迁移到数据库管理对话框中
+        
+        if settings_menu is not None:
+            # 设置菜单
+            crawler_settings_action = QAction('爬虫设置', self)
+            crawler_settings_action.triggered.connect(self.show_crawler_settings)
+            settings_menu.addAction(crawler_settings_action)
         
         if help_menu is not None:
             # 帮助菜单
@@ -421,7 +435,7 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(True)  # 允许文字换行
         
         # 设置表格右键菜单
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
         
         # 设置行高
@@ -607,9 +621,29 @@ class MainWindow(QMainWindow):
             db_results = db.search_policies(level, keywords, start_date, end_date)
             need_crawl = self._need_crawl_new_data(db_results, keywords)
             
-            # 获取防反爬虫设置
-            enable_anti_crawler = self.anti_crawler_checkbox.isChecked()
+            # 优先级处理：查询速度设置 > 爬虫设置
+            # 1. 获取查询速度设置（优先级最高）
             speed_mode = self.speed_combo.currentText()
+            enable_anti_crawler = self.anti_crawler_checkbox.isChecked()
+            
+            # 2. 根据速度模式动态调整防反爬虫设置
+            if speed_mode == "快速模式":
+                # 快速模式：禁用大部分防反爬虫措施，优先速度
+                enable_anti_crawler = False
+                self.progress_label.setText("使用快速模式：已禁用防反爬虫限制")
+            elif speed_mode == "慢速模式":
+                # 慢速模式：启用所有防反爬虫措施，优先安全
+                enable_anti_crawler = True
+                self.progress_label.setText("使用慢速模式：已启用完整防反爬虫措施")
+            else:  # 正常速度
+                # 正常模式：使用用户设置的防反爬虫开关
+                self.progress_label.setText(f"使用正常速度：防反爬虫{'已启用' if enable_anti_crawler else '已禁用'}")
+            
+            # 3. 显示设置优先级提示
+            if need_crawl:
+                priority_msg = f"设置优先级：查询速度({speed_mode}) > 爬虫设置"
+                self.progress_label.setText(f"{priority_msg} - 正在准备爬取...")
+                QApplication.processEvents()
             
             # 创建并启动搜索线程
             self.current_data = [] # 清空当前数据
@@ -1384,6 +1418,65 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "错误", "无法访问系统剪贴板")
         else:
             QMessageBox.warning(self, "提示", "没有可复制的内容")
+    
+    def show_context_menu(self, position):
+        """显示表格右键菜单"""
+        try:
+            # 获取点击的行
+            row = self.table.rowAt(position.y())
+            if row < 0 or row >= len(self.current_data):
+                return
+            
+            # 创建右键菜单
+            menu = QMenu(self)
+            
+            # 获取当前行数据
+            item = self.current_data[row]
+            if isinstance(item, (list, tuple)):
+                title = str(item[2]) if len(item) > 2 else ""
+                source = str(item[4]) if len(item) > 4 else ""
+                content = str(item[5]) if len(item) > 5 else ""
+            elif isinstance(item, dict):
+                title = str(item.get('title', ''))
+                source = str(item.get('source', ''))
+                content = str(item.get('content', ''))
+            else:
+                title = source = content = ""
+            
+            # 添加菜单项
+            copy_title_action = menu.addAction("📋 复制标题")
+            copy_source_action = menu.addAction("🔗 复制来源")
+            copy_content_action = menu.addAction("📄 复制全文")
+            menu.addSeparator()
+            view_full_text_action = menu.addAction("👁️ 查看全文")
+            
+            # 显示菜单并获取用户选择
+            action = menu.exec_(self.table.mapToGlobal(position))
+            
+            if action == copy_title_action:
+                clipboard = QApplication.clipboard()
+                if clipboard is not None:
+                    clipboard.setText(title)
+                    QMessageBox.information(self, "复制成功", f"政策标题已复制到剪贴板")
+            
+            elif action == copy_source_action:
+                clipboard = QApplication.clipboard()
+                if clipboard is not None:
+                    clipboard.setText(source)
+                    QMessageBox.information(self, "复制成功", f"政策来源已复制到剪贴板")
+            
+            elif action == copy_content_action:
+                clipboard = QApplication.clipboard()
+                if clipboard is not None:
+                    clipboard.setText(content)
+                    QMessageBox.information(self, "复制成功", f"政策全文已复制到剪贴板")
+            
+            elif action == view_full_text_action:
+                self._show_full_text(title, content)
+                
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"显示右键菜单失败: {str(e)}")
+    
     def on_table_click(self, row, col):
         """处理表格点击事件"""
         if row >= len(self.current_data):
@@ -1489,11 +1582,25 @@ class MainWindow(QMainWindow):
     
     # 清理数据库功能已迁移到数据库管理对话框中
     
+    def show_crawler_settings(self):
+        """显示爬虫设置对话框"""
+        try:
+            from .crawler_settings_dialog import CrawlerSettingsDialog
+            dialog = CrawlerSettingsDialog(self)
+            dialog.settings_changed.connect(self.on_settings_changed)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法打开爬虫设置对话框：{e}")
+    
+    def on_settings_changed(self):
+        """设置改变事件"""
+        QMessageBox.information(self, "设置已更新", "爬虫设置已保存，新的设置将在下次爬取时生效。")
+    
     def show_about(self):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.1.1\n"
+            "版本: 2.1.4\n"
             "更新时间: 2025.7.8\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
@@ -1518,12 +1625,6 @@ class MainWindow(QMainWindow):
         """导出数据（菜单项）"""
         self.on_export()
 
-    def show_context_menu(self, pos):
-        """表格右键菜单"""
-        from PyQt5.QtWidgets import QMenu
-        menu = QMenu(self)
-        # PDF导出功能已移除
-        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
 def main():
     """主程序入口函数"""

@@ -6,8 +6,8 @@
 数据管理、导出、定时更新和智能对比等功能。
 """
 
-__version__ = "1.0.0"
-__author__ = "空间规划政策爬虫开发团队"
+__version__ = "2.1.4"
+__author__ = "ViVi141"
 __description__ = "空间规划政策爬虫系统"
 
 # 移除相对导入，避免启动时出现问题
@@ -16,9 +16,11 @@ __description__ = "空间规划政策爬虫系统"
 # from .spider.anti_crawler import AntiCrawlerManager
 # from .spider.national import NationalPolicyCrawler
 
+# 由于移除了相对导入，__all__也需要相应调整
 __all__ = [
-    'Config',
-    'DatabaseManager', 
-    'AntiCrawlerManager',
-    'NationalPolicyCrawler'
+    # 这些类在实际使用时需要显式导入
+    # 'Config',
+    # 'DatabaseManager', 
+    # 'AntiCrawlerManager',
+    # 'NationalPolicyCrawler'
 ] 

@@ -22,7 +22,7 @@ import hashlib
 # 启用SSL安全验证
 # 移除SSL警告禁用，确保安全连接
 
-from .anti_crawler import AntiCrawlerManager, RequestRateLimiter
+from .anti_crawler import AntiCrawlerManager
 from .monitor import CrawlerMonitor
 from ..core import database as db
 
@@ -36,7 +36,6 @@ class GuangdongSpider:
         # 初始化防反爬虫组件
         self.anti_crawler = AntiCrawlerManager()
         self.monitor = CrawlerMonitor()
-        self.rate_limiter = RequestRateLimiter()
         
         # 创建会话
         self.session = requests.Session()
@@ -1207,10 +1206,6 @@ class GuangdongSpider:
         return {
             'speed_mode': self.speed_mode,
             'monitor_stats': self.monitor.get_stats(),
-            'rate_limiter_stats': {
-                'max_requests': self.rate_limiter.max_requests,
-                'time_window': self.rate_limiter.time_window
-            }
         }
     
     def save_to_db(self, policies):

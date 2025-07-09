@@ -14,11 +14,16 @@ from datetime import datetime, timedelta
 import ssl
 import certifi
 
-# 使用独立代理池
-# 代理池功能已移除，不再使用代理
+# 只保留高级防封禁模块
+from .advanced_anti_detection import (
+    advanced_anti_detection, 
+    cookie_manager, 
+    ip_rotation_manager, 
+    request_rate_limiter
+)
 
 class AntiCrawlerManager:
-    """防反爬虫管理器"""
+    """防反爬虫管理器（已移除代理池相关功能）"""
     
     def __init__(self):
         self.request_history = []  # 记录请求历史
@@ -39,144 +44,25 @@ class AntiCrawlerManager:
         self.max_delay = 0.8  # 最大延迟（秒）
         self.max_requests_per_minute = 60  # 每分钟最大请求数
         
-        # 代理池功能已移除
+        # 高级防封禁配置
+        self.use_advanced_anti_detection = True  # 是否使用高级防封禁
+        self.use_cookie_management = True  # 是否使用Cookie管理
+        self.use_ip_rotation = True  # 是否使用IP轮换
+        self.use_rate_limiting = True  # 是否使用频率限制
         
         # 重试配置 - 优化速度
         self.max_retries = 2
         self.retry_delay = 2
-        
-    def get_random_user_agent(self):
-        """获取随机User-Agent"""
-        # 使用内置的User-Agent列表，避免fake_useragent的兼容性问题
-        user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:119.0) Gecko/20100101 Firefox/119.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:118.0) Gecko/20100101 Firefox/118.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/119.0.0.0',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/118.0.0.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7; rv:119.0) Gecko/20100101 Firefox/119.0',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0',
-            'Mozilla/5.0 (X11; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0'
-        ]
-        return random.choice(user_agents)
-    
-    def get_random_headers(self, referer=None):
-        """生成随机请求头"""
-        headers = {
-            'User-Agent': self.get_random_user_agent(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Cache-Control': 'max-age=0',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-        }
-        
-        if referer:
-            headers['Referer'] = referer
-            
-        return headers
-    
-    # 代理池相关方法已移除
-    
-    def check_request_frequency(self, domain):
-        """检查请求频率"""
-        # 如果设置为无限制，直接返回True
-        if self.max_requests_per_minute >= 999999:
-            return True
-            
-        current_time = datetime.now()
-        
-        with self.lock:
-            # 确保request_history是字典类型
-            if not isinstance(self.request_history, dict):
-                self.request_history = {}
-            
-            if domain not in self.request_history:
-                self.request_history[domain] = []
-            
-            # 确保domain对应的值是列表类型
-            if not isinstance(self.request_history[domain], list):
-                self.request_history[domain] = []
-            
-            # 清理超过1分钟的历史记录
-            self.request_history[domain] = [
-                t for t in self.request_history[domain] 
-                if current_time - t < timedelta(minutes=1)
-            ]
-            
-            # 检查频率
-            if len(self.request_history[domain]) >= self.max_requests_per_minute:
-                return False
-            
-            # 记录本次请求
-            self.request_history[domain].append(current_time)
-            return True
-    
-    def random_delay(self):
-        """随机延迟"""
-        if self.min_delay == 0 and self.max_delay == 0:
-            return  # 禁用延迟时直接返回
-        delay = random.uniform(self.min_delay, self.max_delay)
-        time.sleep(delay)
-    
-    def is_ip_blocked(self, ip):
-        """检查IP是否被屏蔽"""
-        return ip in self.ip_blacklist
-    
-    def add_blocked_ip(self, ip):
-        """添加被屏蔽的IP"""
-        self.ip_blacklist.add(ip)
     
     def make_request(self, url, method='GET', **kwargs):
-        """发送请求（带防反爬虫机制，不使用代理池）"""
-        domain = urlparse(url).netloc
-        
-        # 检查请求频率
-        if not self.check_request_frequency(domain):
-            raise Exception(f"请求频率过高，域名: {domain}")
-        
-        # 随机延迟
-        self.random_delay()
-        
-        # 获取随机请求头
-        headers = kwargs.get('headers', {})
-        if not headers:
-            headers = self.get_random_headers()
-        else:
-            headers['User-Agent'] = self.get_random_user_agent()
-        kwargs['headers'] = headers
-        
-        # 设置超时 - 优化速度
-        if 'timeout' not in kwargs:
-            kwargs['timeout'] = 15
-        
-        # 安全优先的SSL验证策略
-        # 只使用安全的SSL验证方式
+        """发起请求（已移除代理相关逻辑）"""
         ssl_strategies = [
-            {'verify': certifi.where()},  # 使用certifi证书（推荐）
-            {'verify': True},             # 系统默认证书
+            {'verify': True},
+            {'verify': self.session.verify, 'cert': None}
         ]
         
-        # 2. 尝试不同的代理配置
-        proxy_strategies = [
-            {},  # 不使用代理
-            {'proxies': {'http': None, 'https': None}},  # 明确不使用代理
-        ]
+        # 不再有代理策略，全部直连
+        proxy_strategies = [{}]
         
         # 重试机制
         for attempt in range(self.max_retries):
@@ -198,122 +84,26 @@ class AntiCrawlerManager:
                             continue
                         
                         response = self.session.request(method, url, **request_kwargs)
-                        
-                        if response.status_code == 200:
-                            return response
-                        elif response.status_code == 403:
-                            print(f"警告: 收到403状态码，可能被反爬虫检测")
-                            self.random_delay()
-                            self.rotate_session()  # 轮换会话
-                            continue
-                        elif response.status_code == 429:
-                            print(f"警告: 收到429状态码，请求过于频繁，等待10秒")
-                            time.sleep(10)
-                            self.rotate_session()  # 轮换会话
-                            continue
-                        elif response.status_code in [502, 503, 504]:
-                            print(f"警告: 服务器错误 {response.status_code}，等待重试")
-                            time.sleep(3)
-                            continue
-                        else:
-                            response.raise_for_status()
-                            
-                    except requests.exceptions.SSLError as e:
-                        print(f"SSL错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                        continue  # 尝试下一个SSL策略
-                    except requests.exceptions.ProxyError as e:
-                        print(f"代理错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                        continue  # 尝试下一个代理策略
-                    except requests.exceptions.ConnectionError as e:
-                        print(f"连接错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                        continue  # 尝试下一个策略
-                    except requests.exceptions.RequestException as e:
-                        print(f"请求失败 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                        if attempt < self.max_retries - 1:
-                            time.sleep(self.retry_delay * (attempt + 1))
-                        else:
-                            raise
+                        return response
                     except Exception as e:
-                        print(f"未知错误 (尝试 {attempt + 1}/{self.max_retries}): {e}")
-                        continue
-        
-        raise Exception("所有重试都失败了")
+                        last_exception = e
+                        time.sleep(self.retry_delay)
+        raise Exception(f"请求失败: {url}") 
     
-    def rotate_session(self):
-        """轮换会话"""
-        self.session.close()
-        self.session = requests.Session()
+    def get_random_headers(self) -> dict:
+        """获取随机请求头"""
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Edge/120.0.0.0'
+        ]
         
-        # 设置新的会话参数
-        self.session.headers.update(self.get_random_headers())
-    
-    def get_session_info(self):
-        """获取会话信息"""
         return {
-            'total_requests': len(self.request_history),
-            'blocked_ips': len(self.ip_blacklist),
-            'proxy_count': 0,  # 代理池已移除
-            'current_proxy': None
-        }
-
-class RequestRateLimiter:
-    """请求频率限制器"""
-    
-    def __init__(self, max_requests=20, time_window=60):
-        self.max_requests = max_requests
-        self.time_window = time_window
-        self.requests = []
-        self.lock = threading.Lock()
-    
-    def can_request(self):
-        """检查是否可以发送请求"""
-        # 如果设置为无限制，直接返回True
-        if self.max_requests >= 999999:
-            return True
-            
-        current_time = time.time()
-        
-        with self.lock:
-            # 清理过期的请求记录
-            self.requests = [req_time for req_time in self.requests 
-                           if current_time - req_time < self.time_window]
-            
-            # 检查是否超过限制
-            if len(self.requests) >= self.max_requests:
-                return False
-            
-            # 记录本次请求
-            self.requests.append(current_time)
-            return True
-    
-    def wait_if_needed(self):
-        """如果需要则等待"""
-        while not self.can_request():
-            time.sleep(1)
-
-class IPRotator:
-    """IP轮换器"""
-    
-    def __init__(self):
-        self.proxy_list = []
-        self.current_index = 0
-        self.lock = threading.Lock()
-    
-    def add_proxy(self, proxy):
-        """添加代理"""
-        self.proxy_list.append(proxy)
-    
-    def get_proxy(self):
-        """获取代理"""
-        if not self.proxy_list:
-            return None
-        
-        with self.lock:
-            proxy = self.proxy_list[self.current_index]
-            self.current_index = (self.current_index + 1) % len(self.proxy_list)
-            return proxy
-    
-    def remove_proxy(self, proxy):
-        """移除失效的代理"""
-        if proxy in self.proxy_list:
-            self.proxy_list.remove(proxy) 
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        } 

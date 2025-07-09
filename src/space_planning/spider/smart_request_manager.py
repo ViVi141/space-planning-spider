@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+智能请求管理器
+根据配置选择不同的防检测策略（无代理池）
+"""
+
+import time
+import random
+import threading
+import requests
+from typing import Dict, Optional, Any, Tuple, List
+from datetime import datetime
+from urllib.parse import urlparse
+
+from .config import crawler_config, AntiDetectionMode
+from .advanced_anti_detection import AdvancedAntiDetection
+from .javascript_fingerprint import JavaScriptFingerprint
+
+class SmartRequestManager:
+    """智能请求管理器（无代理池）"""
+    
+    def __init__(self):
+        # 初始化组件
+        self.anti_detection = AdvancedAntiDetection()
+        self.js_fingerprint = JavaScriptFingerprint()
+        
+        # 请求配置
+        self.session = requests.Session()
+        self.request_history = []
+        
+        # 统计信息
+        self.total_requests = 0
+        self.successful_requests = 0
+        self.failed_requests = 0
+        
+        # 线程锁
+        self.lock = threading.Lock()
+        
+        # 初始化会话
+        self._initialize_session()
+    
+    def _initialize_session(self):
+        """初始化会话"""
+        # 设置默认请求头
+        headers = self._get_basic_headers()
+        self.session.headers.update(headers)
+    
+    def _get_basic_headers(self) -> Dict[str, str]:
+        """获取基础请求头"""
+        return {
+            'User-Agent': self._get_user_agent(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+    
+    def _get_user_agent(self) -> str:
+        """获取User-Agent"""
+        if crawler_config.get_config('headers_settings.randomize_user_agent'):
+            return self.anti_detection.get_random_headers()['User-Agent']
+        else:
+            return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    
+    def _get_enhanced_headers(self, url: str) -> Dict[str, str]:
+        """获取增强模式请求头"""
+        headers = self._get_basic_headers()
+        
+        # 添加Referer
+        if crawler_config.get_config('headers_settings.add_referer'):
+            parsed_url = urlparse(url)
+            headers['Referer'] = f"{parsed_url.scheme}://{parsed_url.netloc}/"
+        
+        # 添加指纹信息
+        if crawler_config.get_config('headers_settings.add_fingerprint'):
+            fingerprint = self.js_fingerprint.generate_complete_fingerprint()
+            headers['X-Client-Data'] = self.js_fingerprint.encode_fingerprint(fingerprint)
+        
+        return headers
+    
+    def _simulate_behavior(self) -> None:
+        """模拟人类行为"""
+        if not crawler_config.get_config('behavior_settings.simulate_human_behavior'):
+            return
+        
+        # 根据模式选择行为类型
+        if crawler_config.is_enhanced_mode():
+            # 增强模式：复杂行为模拟
+            behavior_type = random.choice(['mouse', 'scroll', 'click', 'delay'])
+            self.anti_detection.simulate_human_behavior(behavior_type)
+        else:
+            # 正常模式：简单延迟
+            delay = random.uniform(
+                crawler_config.get_config('request_delay.min'),
+                crawler_config.get_config('request_delay.max')
+            )
+            time.sleep(delay)
+    
+    def make_request(self, url: str, method: str = 'GET', 
+                    data: Optional[Dict] = None, headers: Optional[Dict] = None) -> Tuple[requests.Response, Dict]:
+        """发送请求（无代理池）"""
+        start_time = time.time()
+        
+        # 准备请求参数
+        request_params = self._prepare_request_params(url, method, data, headers)
+        
+        # 模拟人类行为
+        self._simulate_behavior()
+        
+        # 发送请求
+        response = self._send_request_with_retry(request_params)
+        
+        # 记录请求历史
+        self._record_request(url, method, response, time.time() - start_time)
+        
+        return response, {
+            'response_time': time.time() - start_time,
+            'status_code': response.status_code,
+            'mode': crawler_config.get_mode().value
+        }
+    
+    def _prepare_request_params(self, url: str, method: str, data: Optional[Dict], 
+                              headers: Optional[Dict]) -> Dict:
+        """准备请求参数（无代理池）"""
+        # 获取请求头
+        if crawler_config.is_enhanced_mode():
+            request_headers = self._get_enhanced_headers(url)
+        else:
+            request_headers = self._get_basic_headers()
+        
+        # 合并自定义请求头
+        if headers:
+            request_headers.update(headers)
+        
+        return {
+            'url': url,
+            'method': method,
+            'data': data if data is not None else {},
+            'headers': request_headers,
+            'timeout': 30
+        }
+    
+    def _send_request_with_retry(self, request_params: Dict) -> requests.Response:
+        """发送请求并重试（无代理池）"""
+        max_retries = crawler_config.get_config('retry_settings.max_retries')
+        retry_delay = crawler_config.get_config('retry_settings.retry_delay')
+        
+        last_exception = None
+        for attempt in range(max_retries + 1):
+            try:
+                # 发送请求
+                response = self.session.request(
+                    method=request_params['method'],
+                    url=request_params['url'],
+                    data=request_params['data'],
+                    headers=request_params['headers'],
+                    timeout=request_params['timeout']
+                )
+                
+                # 检查响应状态
+                if response.status_code == 200:
+                    return response
+                else:
+                    raise requests.RequestException(f"HTTP {response.status_code}")
+            except Exception as e:
+                last_exception = e
+                time.sleep(retry_delay * (attempt + 1))
+        raise last_exception or Exception("请求失败")
+    
+    def _record_request(self, url: str, method: str, response: requests.Response, response_time: float):
+        """记录请求历史"""
+        with self.lock:
+            self.total_requests += 1
+            
+            if response.status_code == 200:
+                self.successful_requests += 1
+            else:
+                self.failed_requests += 1
+            
+            # 记录到历史
+            self.request_history.append({
+                'url': url,
+                'method': method,
+                'status_code': response.status_code,
+                'response_time': response_time,
+                'timestamp': datetime.now()
+            })
+            
+            # 保持历史记录在合理范围内
+            if len(self.request_history) > 1000:
+                self.request_history = self.request_history[-500:]
+    
+    def get_page(self, url: str, headers: Optional[Dict] = None) -> Tuple[requests.Response, Dict]:
+        """获取页面（无代理池）"""
+        return self.make_request(url, headers=headers)
+    
+    def get_page_with_behavior(self, url: str, behavior_type: Optional[str] = None) -> Tuple[requests.Response, Dict]:
+        """获取页面并模拟行为（无代理池）"""
+        # 模拟行为
+        if behavior_type:
+            self.anti_detection.simulate_human_behavior(behavior_type)
+        else:
+            self._simulate_behavior()
+        
+        # 发送请求
+        return self.make_request(url)
+    
+    def get_page_with_js_injection(self, url: str, js_code: Optional[str] = None) -> Tuple[requests.Response, Dict]:
+        """获取页面并注入JavaScript（无代理池）"""
+        # 如果有JS代码，可以在这里处理
+        if js_code:
+            # 这里可以添加JS注入逻辑
+            pass
+        
+        # 发送请求
+        return self.make_request(url)
+    
+    def get_session_info(self) -> Dict:
+        """获取会话信息（无代理池）"""
+        return {
+            'mode': crawler_config.get_mode().value,
+            'config': crawler_config.get_config(),
+            'request_stats': {
+                'total_requests': self.total_requests,
+                'successful_requests': self.successful_requests,
+                'failed_requests': self.failed_requests,
+                'success_rate': round(self.successful_requests / self.total_requests * 100, 2) if self.total_requests > 0 else 0
+            }
+        }
+    
+    def get_request_history(self, limit: int = 50) -> List[Dict]:
+        """获取请求历史"""
+        with self.lock:
+            return self.request_history[-limit:]
+    
+    def clear_request_history(self):
+        """清除请求历史"""
+        with self.lock:
+            self.request_history.clear()
+    
+    def switch_mode(self, mode: AntiDetectionMode) -> None:
+        """切换防检测模式"""
+        crawler_config.set_mode(mode)
+        print(f"已切换到{mode.value}模式")
+    
+    def print_status(self) -> None:
+        """打印当前状态"""
+        crawler_config.print_current_config()
+        print(f"\n请求统计:")
+        print(f"总请求数: {self.total_requests}")
+        print(f"成功请求: {self.successful_requests}")
+        print(f"失败请求: {self.failed_requests}")
+        if self.total_requests > 0:
+            print(f"成功率: {self.successful_requests / self.total_requests * 100:.1f}%")
+
+# 全局实例
+smart_request_manager = SmartRequestManager() 

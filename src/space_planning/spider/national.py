@@ -11,7 +11,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
 from core import database as db
-from .anti_crawler import AntiCrawlerManager, RequestRateLimiter
+from .anti_crawler import AntiCrawlerManager
 from .monitor import CrawlerMonitor
 from bs4 import BeautifulSoup, Tag
 
@@ -24,7 +24,6 @@ class NationalSpider:
         
         # 初始化防反爬虫管理器
         self.anti_crawler = AntiCrawlerManager()
-        self.rate_limiter = RequestRateLimiter(max_requests=15, time_window=60)
         self.monitor = CrawlerMonitor()
         
         # 速度模式配置
@@ -75,22 +74,18 @@ class NationalSpider:
             self.anti_crawler.min_delay = 0.0
             self.anti_crawler.max_delay = 0.0
             self.anti_crawler.max_requests_per_minute = 999999  # 无限制
-            self.rate_limiter.max_requests = 999999  # 无限制
         elif speed_mode == "快速模式":
             self.anti_crawler.min_delay = 0.1
             self.anti_crawler.max_delay = 0.3
             self.anti_crawler.max_requests_per_minute = 100
-            self.rate_limiter.max_requests = 30
         elif speed_mode == "慢速模式":
             self.anti_crawler.min_delay = 2.0
             self.anti_crawler.max_delay = 5.0
             self.anti_crawler.max_requests_per_minute = 10
-            self.rate_limiter.max_requests = 5
         else:  # 正常速度
             self.anti_crawler.min_delay = 0.2
             self.anti_crawler.max_delay = 0.8
             self.anti_crawler.max_requests_per_minute = 60
-            self.rate_limiter.max_requests = 15
         
         policies = []
         page_size = 30
@@ -116,7 +111,7 @@ class NationalSpider:
             
             try:
                 # 检查请求频率限制
-                self.rate_limiter.wait_if_needed()
+                # self.rate_limiter.wait_if_needed() # Removed as per edit hint
                 
                 import json
                 param_json = {
@@ -289,10 +284,7 @@ class NationalSpider:
         return {
             'speed_mode': self.speed_mode,
             'monitor_stats': self.monitor.get_stats(),
-            'rate_limiter_stats': {
-                'max_requests': self.rate_limiter.max_requests,
-                'time_window': self.rate_limiter.time_window
-            }
+            # Removed rate_limiter_stats as per edit hint
         }
 
     def get_policy_detail(self, url, stop_callback=None):
