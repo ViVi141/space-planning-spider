@@ -237,7 +237,7 @@ def search_policies(level=None, keywords=None, start_date=None, end_date=None):
     
     if keywords:
         # 使用全文检索
-        if level and level != "全部机构":
+        if level:
             query = f"level:{level} AND ({' OR '.join(keywords)})"
         else:
             query = ' OR '.join(keywords)
@@ -247,7 +247,7 @@ def search_policies(level=None, keywords=None, start_date=None, end_date=None):
         c.execute(sql, (query, *params))
     else:
         # 普通查询
-        if level and level != "全部机构":
+        if level:
             sql = f'''SELECT id, level, title, pub_date, source, content, category 
                       FROM policy p WHERE level = ?{date_sql} ORDER BY pub_date DESC'''
             c.execute(sql, (level, *params))

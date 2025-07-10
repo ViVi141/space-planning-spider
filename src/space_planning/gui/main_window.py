@@ -62,9 +62,6 @@ class SearchThread(QThread):
                         spider = self.main_window.guangdong_spider
                     elif self.level == "自然资源部":
                         spider = self.main_window.mnr_spider
-                    elif self.level == "全部机构":
-                        # 对于全部机构，默认使用国家级爬虫
-                        spider = self.main_window.national_spider
                     else:
                         # 其他机构暂时使用国家级爬虫
                         spider = self.main_window.national_spider
@@ -277,12 +274,12 @@ class MainWindow(QMainWindow):
         try:
             from space_planning.spider import get_all_spider_levels
             spider_levels = get_all_spider_levels()
-            self.level_combo.addItems(["全部机构"] + spider_levels)
+            self.level_combo.addItems(spider_levels)
             print(f"动态加载的爬虫机构: {spider_levels}")
         except Exception as e:
             print(f"动态加载爬虫机构失败: {e}")
             # 降级方案：只显示已实现的爬虫
-            self.level_combo.addItems(["全部机构", "住房和城乡建设部", "广东省人民政府", "自然资源部"])
+            self.level_combo.addItems(["住房和城乡建设部", "广东省人民政府", "自然资源部"])
         
         self.keyword_edit = QLineEdit()
         self.keyword_edit.setPlaceholderText("请输入项目关键词，如'控制性详细规划'、'建设用地'...")
@@ -1131,7 +1128,8 @@ class MainWindow(QMainWindow):
             # 创建并启动批量爬取线程
             self.current_data = [] # 清空当前数据
             self.refresh_table([]) # 清空表格
-            self.batch_thread = SearchThread("全部机构", None, True, start_date, end_date, True, "正常速度", None, self)
+            # 使用第一个可用的机构进行批量爬取
+            self.batch_thread = SearchThread("住房和城乡建设部", None, True, start_date, end_date, True, "正常速度", None, self)
             self.batch_thread.progress_signal.connect(self.update_progress)
             self.batch_thread.result_signal.connect(self.update_results)
             self.batch_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接

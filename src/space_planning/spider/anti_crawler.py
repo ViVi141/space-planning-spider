@@ -23,7 +23,7 @@ from .advanced_anti_detection import (
 )
 
 class AntiCrawlerManager:
-    """防反爬虫管理器（已移除代理池相关功能）"""
+    """防反爬虫管理器"""
     
     def __init__(self):
         self.request_history = []  # 记录请求历史
@@ -55,39 +55,34 @@ class AntiCrawlerManager:
         self.retry_delay = 2
     
     def make_request(self, url, method='GET', **kwargs):
-        """发起请求（已移除代理相关逻辑）"""
+        """发起请求"""
         ssl_strategies = [
             {'verify': True},
             {'verify': self.session.verify, 'cert': None}
         ]
         
-        # 不再有代理策略，全部直连
-        proxy_strategies = [{}]
-        
         # 重试机制
         for attempt in range(self.max_retries):
             for ssl_strategy in ssl_strategies:
-                for proxy_strategy in proxy_strategies:
-                    try:
-                        # 合并配置
-                        request_kwargs = kwargs.copy()
-                        request_kwargs.update(ssl_strategy)
-                        request_kwargs.update(proxy_strategy)
-                        
-                        # 添加额外的网络兼容性设置
-                        request_kwargs['allow_redirects'] = True
-                        request_kwargs['stream'] = False
-                        
-                        # 确保SSL安全验证
-                        if not request_kwargs.get('verify', True):
-                            print("警告: 检测到不安全的SSL配置，已跳过")
-                            continue
-                        
-                        response = self.session.request(method, url, **request_kwargs)
-                            return response
-                    except Exception as e:
-                        last_exception = e
-                        time.sleep(self.retry_delay)
+                try:
+                    # 合并配置
+                    request_kwargs = kwargs.copy()
+                    request_kwargs.update(ssl_strategy)
+                    
+                    # 添加额外的网络兼容性设置
+                    request_kwargs['allow_redirects'] = True
+                    request_kwargs['stream'] = False
+                    
+                    # 确保SSL安全验证
+                    if not request_kwargs.get('verify', True):
+                        print("警告: 检测到不安全的SSL配置，已跳过")
+                        continue
+                    
+                    response = self.session.request(method, url, **request_kwargs)
+                    return response
+                except Exception as e:
+                    last_exception = e
+                    time.sleep(self.retry_delay)
         raise Exception(f"请求失败: {url}") 
     
     def get_random_headers(self) -> dict:

@@ -244,6 +244,29 @@ class CrawlerStatusDialog(QDialog):
         except:
             return self.spider
     
+    def get_all_spiders_status(self):
+        """获取所有爬虫的状态"""
+        status_dict = {}
+        
+        # 获取各个爬虫的状态
+        if hasattr(self, 'spiders_dict') and self.spiders_dict:
+            for name, spider in self.spiders_dict.items():
+                try:
+                    status = spider.get_crawler_status()
+                    status_dict[name] = status
+                except Exception as e:
+                    status_dict[name] = {'error': str(e)}
+        
+        # 添加当前爬虫状态
+        try:
+            current_spider = self.get_current_spider()
+            status = current_spider.get_crawler_status()
+            status_dict['current'] = status
+        except Exception as e:
+            status_dict['current'] = {'error': str(e)}
+        
+        return status_dict
+    
     def format_status_info(self, status):
         """格式化状态信息"""
         current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

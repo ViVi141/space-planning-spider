@@ -174,7 +174,7 @@ class MNRSpider:
                         if consecutive_empty_pages >= max_consecutive_empty:
                             if callback:
                                 callback(f"分类[{category_name}]连续{max_consecutive_empty}页无数据，停止爬取")
-                            break
+                        break
                         page += 1
                         continue
                     else:
