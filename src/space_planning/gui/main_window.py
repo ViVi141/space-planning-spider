@@ -29,7 +29,7 @@ class SearchThread(QThread):
     error_signal = pyqtSignal(str)     # 错误信号
     data_count_signal = pyqtSignal(int)  # 数据量信号
     
-    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None):
+    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None, main_window=None):
         super().__init__()
         self.level = level
         self.keywords = keywords
@@ -39,6 +39,7 @@ class SearchThread(QThread):
         self.enable_anti_crawler = enable_anti_crawler
         self.speed_mode = speed_mode
         self.spider = spider  # 使用传入的spider实例
+        self.main_window = main_window  # 保存主窗口引用，用于访问持久爬虫实例
         self.stop_flag = False  # 停止标志
     
     def run(self):
@@ -53,27 +54,23 @@ class SearchThread(QThread):
             
             if self.need_crawl and not self.stop_flag:
                 self.progress_signal.emit("正在爬取最新数据...")
-                # 根据选择的机构动态创建对应的爬虫
-                if self.level == "住房和城乡建设部":
-                    from space_planning.spider.national import NationalSpider
-                    spider = NationalSpider()
-                elif self.level == "广东省人民政府":
-                    from space_planning.spider.guangdong import GuangdongSpider
-                    spider = GuangdongSpider()
-                elif self.level == "自然资源部":
-                    from space_planning.spider.mnr import MNRSpider
-                    spider = MNRSpider()
-                elif self.level == "全部机构":
-                    # 对于全部机构，默认使用国家级爬虫
-                    from space_planning.spider.national import NationalSpider
-                    spider = NationalSpider()
-                else:
-                    # 其他机构暂时使用国家级爬虫
-                    from space_planning.spider.national import NationalSpider
-                    spider = NationalSpider()
-                
-                # 保存爬虫实例，供监控使用
-                self.spider = spider
+                # 根据选择的机构使用对应的持久爬虫实例
+                if self.main_window:
+                    if self.level == "住房和城乡建设部":
+                        spider = self.main_window.national_spider
+                    elif self.level == "广东省人民政府":
+                        spider = self.main_window.guangdong_spider
+                    elif self.level == "自然资源部":
+                        spider = self.main_window.mnr_spider
+                    elif self.level == "全部机构":
+                        # 对于全部机构，默认使用国家级爬虫
+                        spider = self.main_window.national_spider
+                    else:
+                        # 其他机构暂时使用国家级爬虫
+                        spider = self.main_window.national_spider
+                    
+                    # 更新当前使用的爬虫实例
+                    self.spider = spider
                 
                 if spider:
                     # 根据速度模式和防反爬虫设置调整爬虫行为
@@ -175,7 +172,7 @@ class MainWindow(QMainWindow):
         self.max_display_rows = 100  # 最大显示100行
         self.page_size = 50  # 每页50行
         self.current_page = 0  # 当前页码
-        self.setWindowTitle("空间规划政策合规性分析系统 v2.1.4 - ViVi141")
+        self.setWindowTitle("空间规划政策合规性分析系统 v2.2.0 - ViVi141")
         
         # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(__file__), "../../../docs/icon.ico")
@@ -187,7 +184,16 @@ class MainWindow(QMainWindow):
         
         # 创建共享的爬虫实例
         from space_planning.spider.national import NationalSpider
-        self.spider = NationalSpider()
+        from space_planning.spider.guangdong import GuangdongSpider
+        from space_planning.spider.mnr import MNRSpider
+        
+        # 为每个机构创建持久的爬虫实例，保持监控数据
+        self.national_spider = NationalSpider()
+        self.guangdong_spider = GuangdongSpider()
+        self.mnr_spider = MNRSpider()
+        
+        # 默认使用国家级爬虫
+        self.spider = self.national_spider
         
         self.init_ui()
     
@@ -649,7 +655,7 @@ class MainWindow(QMainWindow):
             self.current_data = [] # 清空当前数据
             self.refresh_table([]) # 清空表格
             # 传递None给SearchThread，让它根据level动态创建爬虫
-            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode, None)
+            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode, None, self)
             self.search_thread.progress_signal.connect(self.update_progress)
             self.search_thread.result_signal.connect(self.update_results)
             self.search_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接
@@ -1125,7 +1131,7 @@ class MainWindow(QMainWindow):
             # 创建并启动批量爬取线程
             self.current_data = [] # 清空当前数据
             self.refresh_table([]) # 清空表格
-            self.batch_thread = SearchThread("全部机构", None, True, start_date, end_date)
+            self.batch_thread = SearchThread("全部机构", None, True, start_date, end_date, True, "正常速度", None, self)
             self.batch_thread.progress_signal.connect(self.update_progress)
             self.batch_thread.result_signal.connect(self.update_results)
             self.batch_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接
@@ -1566,7 +1572,12 @@ class MainWindow(QMainWindow):
         """显示爬虫状态实时监控"""
         try:
             from space_planning.gui.crawler_status_dialog import CrawlerStatusDialog
-            dialog = CrawlerStatusDialog(self)
+            # 传递所有爬虫实例到监控对话框
+            dialog = CrawlerStatusDialog(self, {
+                'national_spider': self.national_spider,
+                'guangdong_spider': self.guangdong_spider,
+                'mnr_spider': self.mnr_spider
+            })
             dialog.show()  # 使用show()而不是exec_()，保持非模态
         except Exception as e:
             QMessageBox.warning(self, "错误", f"打开爬虫状态监控失败: {str(e)}")
@@ -1600,8 +1611,8 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.1.4\n"
-            "更新时间: 2025.7.8\n"
+            "版本: 2.2.0\n"
+            "更新时间: 2025.7.10\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
             "开发者: ViVi141\n"

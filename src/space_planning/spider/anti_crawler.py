@@ -84,7 +84,7 @@ class AntiCrawlerManager:
                             continue
                         
                         response = self.session.request(method, url, **request_kwargs)
-                        return response
+                            return response
                     except Exception as e:
                         last_exception = e
                         time.sleep(self.retry_delay)

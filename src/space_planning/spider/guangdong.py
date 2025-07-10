@@ -91,10 +91,13 @@ class GuangdongSpider:
         try:
             resp = self.session.get(self.base_url, timeout=10)
             if resp.status_code == 200:
+                self.monitor.record_request(self.base_url, success=True)
                 print("成功访问首页，获取必要Cookie")
             else:
+                self.monitor.record_request(self.base_url, success=False, error_type=f"HTTP {resp.status_code}")
                 print(f"访问首页失败，状态码: {resp.status_code}")
         except Exception as e:
+            self.monitor.record_request(self.base_url, success=False, error_type=str(e))
             print(f"访问首页异常: {e}")
     
     def _request_page_with_check(self, page_index, search_params, old_page_index=None):
@@ -108,8 +111,13 @@ class GuangdongSpider:
             print(f"请求翻页校验接口: 第{page_index}页")
             try:
                 check_resp = self.session.post(check_url, headers=check_headers, timeout=15)
+                if check_resp.status_code == 200:
+                    self.monitor.record_request(check_url, success=True)
+                else:
+                    self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
                 print(f"翻页校验响应状态码: {check_resp.status_code}")
             except Exception as check_error:
+                self.monitor.record_request(check_url, success=False, error_type=str(check_error))
                 print(f"翻页校验请求失败: {check_error}")
                 # 翻页校验失败不影响主请求，继续执行
             
@@ -343,6 +351,7 @@ class GuangdongSpider:
                     resp = self.session.get(strategy['url'], timeout=30)
                 
                 if resp.status_code == 200:
+                    self.monitor.record_request(strategy['url'], success=True)
                     soup = BeautifulSoup(resp.content, 'html.parser')
                     policies = self._parse_policy_list_record_search(soup, callback, stop_callback, strategy['name'])
                     
@@ -352,6 +361,7 @@ class GuangdongSpider:
                     else:
                         print(f"策略 {strategy['name']} 未获取到政策")
                 else:
+                    self.monitor.record_request(strategy['url'], success=False, error_type=f"HTTP {resp.status_code}")
                     print(f"策略 {strategy['name']} 请求失败，状态码: {resp.status_code}")
                     
             except Exception as e:

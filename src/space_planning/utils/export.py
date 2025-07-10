@@ -28,6 +28,29 @@ def export_to_word(data, file_path):
     stats_para = doc.add_paragraph(f'共导出 {len(data)} 条政策文件')
     stats_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
+    # 添加目录
+    toc_heading = doc.add_heading('目录', level=1)
+    toc_para = doc.add_paragraph()
+    
+    # 生成目录内容
+    for i, policy in enumerate(data, 1):
+        # 解析政策数据格式
+        if isinstance(policy, (list, tuple)):
+            title = str(policy[2]) if len(policy) > 2 else "未知标题"
+            pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+        elif isinstance(policy, dict):
+            title = str(policy.get('title', '未知标题'))
+            pub_date = str(policy.get('pub_date', '未知日期'))
+        else:
+            title = "未知"
+            pub_date = "未知日期"
+        
+        # 添加目录项（包含时间）
+        toc_para.add_run(f'{i}. {title} ({pub_date})\n')
+    
+    # 添加分隔线
+    doc.add_paragraph('=' * 50)
+    
     # 为每个政策添加内容
     for i, policy in enumerate(data, 1):
         # 解析政策数据格式
@@ -88,6 +111,65 @@ class DataExporter:
             return False
         
         try:
+            # 创建Excel工作簿
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, Alignment
+            
+            wb = Workbook()
+            
+            # 创建目录工作表
+            toc_sheet = wb.active
+            if toc_sheet is not None:
+                toc_sheet.title = "目录"
+                
+                # 设置目录标题
+                toc_sheet['A1'] = "空间规划政策汇总目录"
+                toc_sheet['A1'].font = Font(bold=True, size=16)
+                toc_sheet['A1'].alignment = Alignment(horizontal='center')
+                toc_sheet.merge_cells('A1:D1')
+                
+                # 添加统计信息
+                toc_sheet['A2'] = f"共导出 {len(data)} 条政策文件"
+                toc_sheet['A2'].alignment = Alignment(horizontal='center')
+                toc_sheet.merge_cells('A2:D2')
+                
+                # 添加目录内容
+                toc_sheet['A4'] = "序号"
+                toc_sheet['B4'] = "政策标题"
+                toc_sheet['C4'] = "发布日期"
+                toc_sheet['D4'] = "层级"
+                toc_sheet['A4'].font = Font(bold=True)
+                toc_sheet['B4'].font = Font(bold=True)
+                toc_sheet['C4'].font = Font(bold=True)
+                toc_sheet['D4'].font = Font(bold=True)
+                
+                for i, policy in enumerate(data, 1):
+                    # 解析政策数据格式
+                    if isinstance(policy, (list, tuple)):
+                        title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                        pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+                        level = str(policy[1]) if len(policy) > 1 else "未知层级"
+                    elif isinstance(policy, dict):
+                        title = str(policy.get('title', '未知标题'))
+                        pub_date = str(policy.get('pub_date', '未知日期'))
+                        level = str(policy.get('level', '未知层级'))
+                    else:
+                        title = pub_date = level = "未知"
+                    
+                    toc_sheet[f'A{i+4}'] = i
+                    toc_sheet[f'B{i+4}'] = title
+                    toc_sheet[f'C{i+4}'] = pub_date
+                    toc_sheet[f'D{i+4}'] = level
+                
+                # 调整列宽
+                toc_sheet.column_dimensions['A'].width = 8
+                toc_sheet.column_dimensions['B'].width = 50
+                toc_sheet.column_dimensions['C'].width = 15
+                toc_sheet.column_dimensions['D'].width = 15
+            
+            # 创建详细内容工作表
+            detail_sheet = wb.create_sheet("详细内容")
+            
             # 转换数据格式
             df_data = []
             for policy in data:
@@ -118,8 +200,25 @@ class DataExporter:
                     '内容': content
                 })
             
+            # 将详细内容写入第二个工作表
             df = pd.DataFrame(df_data)
-            df.to_excel(file_path, index=False, engine='openpyxl')
+            for row_idx, (index, row) in enumerate(df.iterrows(), 1):
+                for col_idx, (col_name, value) in enumerate(row.items(), 1):
+                    detail_sheet.cell(row=row_idx+1, column=col_idx, value=value)
+            
+            # 设置详细内容表头
+            for col_idx, col_name in enumerate(df.columns, 1):
+                detail_sheet.cell(row=1, column=col_idx, value=col_name).font = Font(bold=True)
+            
+            # 调整详细内容列宽
+            detail_sheet.column_dimensions['A'].width = 8
+            detail_sheet.column_dimensions['B'].width = 15
+            detail_sheet.column_dimensions['C'].width = 60
+            detail_sheet.column_dimensions['D'].width = 15
+            detail_sheet.column_dimensions['E'].width = 40
+            detail_sheet.column_dimensions['F'].width = 80
+            
+            wb.save(file_path)
             return True
         except Exception as e:
             print(f"导出Excel文件失败: {e}")
@@ -133,6 +232,26 @@ class DataExporter:
                 f.write('=' * 50 + '\n')
                 f.write(f'共导出 {len(data)} 条政策文件\n\n')
                 
+                # 添加目录
+                f.write('目录\n')
+                f.write('-' * 30 + '\n')
+                for i, policy in enumerate(data, 1):
+                    # 解析政策数据格式
+                    if isinstance(policy, (list, tuple)):
+                        title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                        pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+                    elif isinstance(policy, dict):
+                        title = str(policy.get('title', '未知标题'))
+                        pub_date = str(policy.get('pub_date', '未知日期'))
+                    else:
+                        title = "未知"
+                        pub_date = "未知日期"
+                    
+                    f.write(f'{i}. {title} ({pub_date})\n')
+                
+                f.write('\n' + '=' * 50 + '\n\n')
+                
+                # 详细内容
                 for i, policy in enumerate(data, 1):
                     # 解析政策数据格式
                     if isinstance(policy, (list, tuple)):
@@ -170,6 +289,25 @@ class DataExporter:
                 f.write(f'**共导出 {len(data)} 条政策文件**\n\n')
                 f.write('---\n\n')
                 
+                # 添加目录
+                f.write('## 目录\n\n')
+                for i, policy in enumerate(data, 1):
+                    # 解析政策数据格式
+                    if isinstance(policy, (list, tuple)):
+                        title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                        pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+                    elif isinstance(policy, dict):
+                        title = str(policy.get('title', '未知标题'))
+                        pub_date = str(policy.get('pub_date', '未知日期'))
+                    else:
+                        title = "未知"
+                        pub_date = "未知日期"
+                    
+                    f.write(f'{i}. [{title} ({pub_date})](#{i}-{title.replace(" ", "-")})\n')
+                
+                f.write('\n---\n\n')
+                
+                # 详细内容
                 for i, policy in enumerate(data, 1):
                     # 解析政策数据格式
                     if isinstance(policy, (list, tuple)):

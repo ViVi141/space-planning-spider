@@ -48,6 +48,28 @@ class StatusUpdateThread(QThread):
         except:
             return self.spider
     
+    def get_all_spiders_status(self):
+        """获取所有爬虫的状态"""
+        status_dict = {}
+        
+        # 获取各个爬虫的状态
+        if self.dialog and hasattr(self.dialog, 'spiders_dict') and self.dialog.spiders_dict:
+            for name, spider in self.dialog.spiders_dict.items():
+                try:
+                    status = spider.get_crawler_status()
+                    status_dict[name] = status
+                except Exception as e:
+                    status_dict[name] = {'error': str(e)}
+        
+        # 添加当前爬虫状态
+        try:
+            current_status = self.spider.get_crawler_status()
+            status_dict['current'] = current_status
+        except Exception as e:
+            status_dict['current'] = {'error': str(e)}
+        
+        return status_dict
+    
     def stop(self):
         """停止线程"""
         self.running = False
@@ -55,7 +77,7 @@ class StatusUpdateThread(QThread):
 class CrawlerStatusDialog(QDialog):
     """爬虫状态实时监控对话框"""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, spiders_dict=None):
         super().__init__(parent)
         self.setWindowTitle("爬虫状态实时监控")
         self.setModal(False)  # 非模态对话框
@@ -66,6 +88,9 @@ class CrawlerStatusDialog(QDialog):
         if os.path.exists(icon_path):
             from PyQt5.QtGui import QIcon
             self.setWindowIcon(QIcon(icon_path))
+        
+        # 保存爬虫实例字典
+        self.spiders_dict = spiders_dict or {}
         
         # 使用传入的spider实例或创建新的
         if parent and hasattr(parent, 'spider'):
@@ -193,16 +218,11 @@ class CrawlerStatusDialog(QDialog):
     def update_status_display(self):
         """更新状态显示"""
         try:
-            # 尝试获取当前爬虫实例
-            current_spider = self.get_current_spider()
-            
-            if hasattr(self, 'current_status'):
-                status = self.current_status
-            else:
-                status = current_spider.get_crawler_status()
+            # 获取所有爬虫的状态
+            all_status = self.get_all_spiders_status()
             
             # 格式化状态信息
-            status_info = self.format_status_info(status)
+            status_info = self.format_all_status_info(all_status)
             self.status_text.setPlainText(status_info)
             
         except Exception as e:
@@ -289,6 +309,70 @@ class CrawlerStatusDialog(QDialog):
         
         return status_info
     
+    def format_all_status_info(self, all_status):
+        """格式化所有爬虫的状态信息"""
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        status_info = f"=== 爬虫状态实时监控 ===\n"
+        status_info += f"更新时间: {current_time}\n\n"
+        
+        # 显示各个爬虫的状态
+        for spider_name, status in all_status.items():
+            if spider_name == 'current':
+                continue  # 跳过current，避免重复
+                
+            status_info += f"【{spider_name.upper()}】\n"
+            
+            if 'error' in status:
+                status_info += f"错误: {status['error']}\n\n"
+                continue
+            
+            # 基本状态
+            status_info += f"速度模式: {status.get('speed_mode', '未知')}\n"
+            
+            # 监控统计
+            monitor_stats = status.get('monitor_stats', {})
+            if monitor_stats:
+                runtime_stats = monitor_stats.get('runtime_stats', {})
+                status_info += f"运行时间: {runtime_stats.get('runtime_hours', 0):.2f} 小时\n"
+                status_info += f"总请求数: {runtime_stats.get('total_requests', 0)}\n"
+                status_info += f"成功请求: {runtime_stats.get('total_success', 0)}\n"
+                status_info += f"失败请求: {runtime_stats.get('total_errors', 0)}\n"
+                status_info += f"成功率: {runtime_stats.get('success_rate', 0):.2%}\n"
+                status_info += f"平均每小时请求数: {runtime_stats.get('requests_per_hour', 0):.1f}\n"
+                status_info += f"最近1小时请求数: {runtime_stats.get('recent_requests_1h', 0)}\n"
+                status_info += f"活跃域名数: {runtime_stats.get('active_domains', 0)}\n"
+                
+                # 错误摘要
+                error_summary = monitor_stats.get('error_summary', {})
+                if error_summary:
+                    status_info += "错误摘要:\n"
+                    for error_type, count in error_summary.items():
+                        status_info += f"  {error_type}: {count} 次\n"
+                
+                # 建议
+                recommendations = monitor_stats.get('recommendations', [])
+                if recommendations:
+                    status_info += "优化建议:\n"
+                    for rec in recommendations:
+                        status_info += f"  • {rec}\n"
+                
+                # 域名统计
+                domain_stats = monitor_stats.get('domain_stats', {})
+                if domain_stats:
+                    status_info += "域名统计:\n"
+                    for domain, stats in domain_stats.items():
+                        status_info += f"  {domain}:\n"
+                        status_info += f"    成功率: {stats.get('success_rate', 0):.2%}\n"
+                        status_info += f"    请求频率: {stats.get('request_frequency', 0):.1f}/分钟\n"
+                        status_info += f"    总请求数: {stats.get('total_requests', 0)}\n"
+            else:
+                status_info += "无监控数据\n"
+            
+            status_info += "\n"
+        
+        return status_info
+    
     def on_auto_refresh_toggled(self, checked):
         """自动刷新开关"""
         self.auto_refresh = checked
@@ -307,8 +391,16 @@ class CrawlerStatusDialog(QDialog):
     def reset_stats(self):
         """重置统计"""
         try:
+            # 重置所有爬虫的统计
             if hasattr(self.spider, 'monitor'):
                 self.spider.monitor.reset_stats()
+            
+            # 重置其他爬虫的统计
+            if self.spiders_dict:
+                for name, spider in self.spiders_dict.items():
+                    if hasattr(spider, 'monitor'):
+                        spider.monitor.reset_stats()
+            
             self.update_status_display()
         except Exception as e:
             print(f"重置统计失败: {e}")

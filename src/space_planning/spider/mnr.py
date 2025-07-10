@@ -140,11 +140,20 @@ class MNRSpider:
                         params['endtime'] = end_date
                     
                     # 发送搜索请求
-                    resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=15)
-                    
-                    if resp.status_code != 200:
+                    try:
+                        resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=15)
+                        
+                        if resp.status_code == 200:
+                            self.monitor.record_request(self.search_api, success=True)
+                        else:
+                            self.monitor.record_request(self.search_api, success=False, error_type=f"HTTP {resp.status_code}")
+                            if callback:
+                                callback(f"分类[{category_name}]第{page}页搜索失败: {resp.status_code}")
+                            break
+                    except Exception as e:
+                        self.monitor.record_request(self.search_api, success=False, error_type=str(e))
                         if callback:
-                            callback(f"分类[{category_name}]第{page}页搜索失败: {resp.status_code}")
+                            callback(f"分类[{category_name}]第{page}页搜索异常: {str(e)}")
                         break
                     
                     # 解析搜索结果
@@ -396,6 +405,7 @@ class MNRSpider:
         """获取政策详情页正文"""
         try:
             resp = requests.get(url, headers=self.headers, timeout=15)
+            self.monitor.record_request(url, success=True)
             resp.encoding = resp.apparent_encoding
             soup = BeautifulSoup(resp.text, 'html.parser')
             
@@ -418,6 +428,7 @@ class MNRSpider:
             # 兜底：返回全页文本
             return soup.get_text(strip=True)
         except Exception as e:
+            self.monitor.record_request(url, success=False, error_type=str(e))
             return ''
 
     def _parse_date(self, date_str):
