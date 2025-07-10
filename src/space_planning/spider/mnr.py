@@ -85,6 +85,10 @@ class MNRSpider:
             if callback:
                 callback(f"开始爬取全部{len(categories_to_search)}个分类...")
         
+        # 用于去重的集合
+        seen_titles = set()
+        seen_links = set()
+        
         # 遍历每个分类进行搜索
         for category_name in categories_to_search:
             if stop_callback and stop_callback():
@@ -108,6 +112,8 @@ class MNRSpider:
             # 分页获取数据
             page = 1
             category_results = []
+            consecutive_empty_pages = 0  # 连续空页计数
+            max_consecutive_empty = 3  # 最大连续空页数
             
             while page <= self.max_pages:
                 if stop_callback and stop_callback():
@@ -152,33 +158,67 @@ class MNRSpider:
                         page_policies = self._parse_json_results(search_data, callback)
                     
                     if not page_policies:
+                        consecutive_empty_pages += 1
                         if callback:
-                            callback(f"分类[{category_name}]第{page}页无数据，停止爬取")
-                        break
+                            callback(f"分类[{category_name}]第{page}页无数据")
+                        
+                        if consecutive_empty_pages >= max_consecutive_empty:
+                            if callback:
+                                callback(f"分类[{category_name}]连续{max_consecutive_empty}页无数据，停止爬取")
+                            break
+                        page += 1
+                        continue
+                    else:
+                        consecutive_empty_pages = 0  # 重置连续空页计数
                     
                     # 过滤和验证数据
                     filtered_policies = []
+                    new_policies_count = 0  # 新增政策计数
+                    
                     for policy in page_policies:
-                        # 时间过滤
-                        pub_date_fmt = self._parse_date(policy.get('pub_date', ''))
-                        if dt_start and pub_date_fmt and pub_date_fmt < dt_start:
+                        # 去重检查
+                        title = policy.get('title', '')
+                        link = policy.get('link', '')
+                        
+                        # 使用标题和链接的组合作为唯一标识
+                        unique_id = f"{title}|{link}"
+                        
+                        if unique_id in seen_titles:
+                            if callback:
+                                callback(f"跳过重复政策: {title}")
                             continue
-                        if dt_end and pub_date_fmt and pub_date_fmt > dt_end:
+                        
+                        # 时间过滤 - 只有当日期解析成功时才进行过滤
+                        pub_date_fmt = self._parse_date(policy.get('pub_date', ''))
+                        time_filtered = False
+                        if pub_date_fmt:
+                            if dt_start and pub_date_fmt < dt_start:
+                                time_filtered = True
+                            if dt_end and pub_date_fmt > dt_end:
+                                time_filtered = True
+                        # 如果日期解析失败，不进行时间过滤，避免误删数据
+                        
+                        if time_filtered:
                             continue
                         
                         # 关键词过滤
-                        if keywords and not any(kw in policy.get('title', '') for kw in keywords):
+                        if keywords and not any(kw in title for kw in keywords):
                             continue
                         
                         # 设置分类信息
                         policy['category'] = category_name
                         
                         # 获取详情页内容
-                        if policy.get('link'):
-                            content = self.get_policy_detail(policy['link'])
+                        if link:
+                            content = self.get_policy_detail(link)
                             policy['content'] = content
                         
+                        # 添加到已见集合
+                        seen_titles.add(unique_id)
+                        seen_links.add(link)
+                        
                         filtered_policies.append(policy)
+                        new_policies_count += 1
                         
                         # 发送政策数据信号（包含正文）
                         if callback:
@@ -187,7 +227,17 @@ class MNRSpider:
                     category_results.extend(filtered_policies)
                     
                     if callback:
-                        callback(f"分类[{category_name}]第{page}页获取{len(filtered_policies)}条政策")
+                        callback(f"分类[{category_name}]第{page}页获取{len(filtered_policies)}条政策（新增{new_policies_count}条）")
+                    
+                    # 如果连续多页没有新增政策，可能已经到达数据末尾
+                    if new_policies_count == 0:
+                        consecutive_empty_pages += 1
+                        if consecutive_empty_pages >= max_consecutive_empty:
+                            if callback:
+                                callback(f"分类[{category_name}]连续{max_consecutive_empty}页无新增政策，停止爬取")
+                            break
+                    else:
+                        consecutive_empty_pages = 0
                     
                     # 控制速度
                     if not disable_speed_limit:
