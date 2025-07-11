@@ -1,30 +1,30 @@
 {
-  "mode": "enhanced",
+  "mode": "normal",
   "config": {
-    "anti_detection_mode": "enhanced",
+    "anti_detection_mode": "normal",
     "use_proxy": false,
     "request_delay": {
-      "min": 2.0,
-      "max": 5.0
+      "min": 1.0,
+      "max": 3.0
     },
     "retry_settings": {
-      "max_retries": 5,
-      "retry_delay": 3
+      "max_retries": 3,
+      "retry_delay": 2
     },
     "session_settings": {
-      "rotation_interval": 180,
-      "max_requests_per_session": 30
+      "rotation_interval": 300,
+      "max_requests_per_session": 50
     },
     "headers_settings": {
       "randomize_user_agent": true,
       "add_referer": true,
-      "add_fingerprint": true
+      "add_fingerprint": false
     },
     "behavior_settings": {
       "simulate_human_behavior": true,
       "random_delay": true,
-      "mouse_movement": true,
-      "scroll_simulation": true
+      "mouse_movement": false,
+      "scroll_simulation": false
     },
     "proxy_settings": {
       "enabled": false,

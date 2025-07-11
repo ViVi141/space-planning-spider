@@ -5,6 +5,9 @@ from docx.oxml.ns import qn
 import os
 import logging
 
+# 导入RAG导出模块
+from .rag_export import RAGExporter, export_for_rag_knowledge_base
+
 # 设置日志
 logger = logging.getLogger(__name__)
 
@@ -337,5 +340,27 @@ class DataExporter:
         except Exception as e:
             print(f"导出Markdown文件失败: {e}")
             return False
+    
+    def export_for_rag(self, data, output_dir, format_type='markdown', max_chunk_size=4096):
+        """
+        为RAG知识库导出优化格式
+        
+        Args:
+            data: 政策数据列表
+            output_dir: 输出目录
+            format_type: 输出格式 ('markdown', 'json', 'txt')
+            max_chunk_size: 最大段落大小
+        
+        Returns:
+            导出结果信息
+        """
+        try:
+            return export_for_rag_knowledge_base(data, output_dir, format_type, max_chunk_size)
+        except Exception as e:
+            print(f"RAG导出失败: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
     
     # PDF导出功能已移除 

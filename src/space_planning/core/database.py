@@ -188,15 +188,30 @@ def should_backup_database():
         return False
 
 def insert_policy(level, title, pub_date, source, content, crawl_time, category=None):
-    """插入政策数据"""
+    """插入政策数据 - 增强去重逻辑"""
     conn = None
     try:
         conn = get_conn()
         c = conn.cursor()
         
-        # 去重：同title和pub_date不重复插入
+        # 增强去重逻辑：检查多种组合
+        # 1. 标题+日期组合
         c.execute('SELECT id FROM policy WHERE title=? AND pub_date=?', (title, pub_date))
         if c.fetchone():
+            print(f"跳过重复政策: {title} ({pub_date})")
+            return None
+        
+        # 2. 标题+来源组合（如果来源相同）
+        if source:
+            c.execute('SELECT id FROM policy WHERE title=? AND source=?', (title, source))
+            if c.fetchone():
+                print(f"跳过重复政策: {title} (来源: {source})")
+                return None
+        
+        # 3. 内容相似度检查（如果内容完全相同）
+        c.execute('SELECT id FROM policy WHERE content=?', (content,))
+        if c.fetchone():
+            print(f"跳过重复内容政策: {title}")
             return None
         
         c.execute('''INSERT INTO policy (level, title, pub_date, source, content, category, crawl_time)
@@ -220,6 +235,88 @@ def insert_policy(level, title, pub_date, source, content, crawl_time, category=
             conn.rollback()
         print(f"插入政策失败: {e}")
         return None
+    finally:
+        if conn:
+            conn.close()
+
+def deduplicate_database():
+    """清理数据库中的重复记录"""
+    conn = None
+    try:
+        conn = get_conn()
+        c = conn.cursor()
+        
+        print("🔍 开始清理数据库重复记录...")
+        
+        # 获取所有政策
+        c.execute('SELECT id, title, pub_date, source, content FROM policy ORDER BY id')
+        all_policies = c.fetchall()
+        
+        if not all_policies:
+            print("数据库中没有政策数据")
+            return {'success': True, 'removed': 0, 'total': 0}
+        
+        print(f"总政策数量: {len(all_policies)}")
+        
+        # 按标题+日期分组，保留最新的记录
+        policy_groups = {}
+        for policy in all_policies:
+            policy_id, title, pub_date, source, content = policy
+            key = (title, pub_date)
+            if key not in policy_groups:
+                policy_groups[key] = []
+            policy_groups[key].append(policy)
+        
+        # 找出重复的记录
+        duplicates_to_remove = []
+        for key, policies in policy_groups.items():
+            if len(policies) > 1:
+                # 保留ID最大的记录（最新的），删除其他的
+                policies.sort(key=lambda x: x[0])  # 按ID排序
+                duplicates_to_remove.extend(policies[:-1])  # 除了最后一个都删除
+        
+        if not duplicates_to_remove:
+            print("✅ 没有发现重复记录")
+            return {'success': True, 'removed': 0, 'total': len(all_policies)}
+        
+        print(f"发现 {len(duplicates_to_remove)} 条重复记录需要删除")
+        
+        # 删除重复记录
+        removed_count = 0
+        for policy in duplicates_to_remove:
+            policy_id, title, pub_date, source, content = policy
+            try:
+                # 删除主表记录
+                c.execute('DELETE FROM policy WHERE id = ?', (policy_id,))
+                # 删除FTS表记录
+                c.execute('DELETE FROM policy_fts WHERE rowid = ?', (policy_id,))
+                removed_count += 1
+                print(f"删除重复记录: {title} ({pub_date})")
+            except Exception as e:
+                print(f"删除记录失败 ID {policy_id}: {e}")
+        
+        conn.commit()
+        
+        # 重新统计
+        c.execute('SELECT COUNT(*) FROM policy')
+        new_count = c.fetchone()[0]
+        
+        print(f"✅ 清理完成！")
+        print(f"   删除了 {removed_count} 条重复记录")
+        print(f"   剩余 {new_count} 条记录")
+        
+        return {
+            'success': True,
+            'removed': removed_count,
+            'total': new_count,
+            'original': len(all_policies)
+        }
+        
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"清理数据库失败: {e}")
+        return {'success': False, 'error': str(e)}
     finally:
         if conn:
             conn.close()

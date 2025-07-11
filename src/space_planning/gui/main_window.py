@@ -1016,7 +1016,8 @@ class MainWindow(QMainWindow):
             "Word文档 (*.docx)",
             "Excel表格 (*.xlsx)", 
             "文本文件 (*.txt)",
-            "Markdown文档 (*.md)"
+            "Markdown文档 (*.md)",
+            "RAG知识库 (*.md/*.json/*.txt)"
         ])
         format_layout.addWidget(format_combo)
         format_group.setLayout(format_layout)
@@ -1066,6 +1067,10 @@ class MainWindow(QMainWindow):
             elif "Markdown" in selected_format:
                 file_filter = "Markdown文档 (*.md)"
                 default_ext = ".md"
+            elif "RAG知识库" in selected_format:
+                # RAG导出需要选择目录，不是单个文件
+                self.export_rag_knowledge_base(selected_policies)
+                return
             else:
                 file_filter = "所有文件 (*.*)"
                 default_ext = ""
@@ -1106,6 +1111,23 @@ class MainWindow(QMainWindow):
                         
                 except Exception as e:
                     QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+    
+    def export_rag_knowledge_base(self, selected_policies):
+        """导出RAG知识库格式"""
+        try:
+            from .rag_export_dialog import show_rag_export_dialog
+            result = show_rag_export_dialog(self, selected_policies)
+            
+            if result == QDialog.Accepted:
+                QMessageBox.information(
+                    self, 
+                    "RAG导出成功", 
+                    f"✅ RAG知识库导出完成！\n\n"
+                    f"📊 共处理 {len(selected_policies)} 条政策\n"
+                    f"📁 请查看输出目录中的分段文件"
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"RAG导出失败: {str(e)}")
 
     def on_batch_update(self):
         """批量爬取数据（不依赖关键词）"""
