@@ -36,7 +36,7 @@ class MNRSpider:
             'Referer': 'https://f.mnr.gov.cn/',
             'X-Requested-With': 'XMLHttpRequest'
         }
-        self.max_pages = 50  # 最大翻页数
+        self.max_pages = 999999  # 最大翻页数（无上限）
         self.channel_id = '174757'  # 法律法规库的频道ID
         
         # 分类配置

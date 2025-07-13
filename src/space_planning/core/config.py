@@ -12,15 +12,15 @@ from pathlib import Path
 # 应用配置
 APP_CONFIG = {
     'app_name': '空间规划政策爬虫系统',
-    'app_version': '1.0.0',
+    'app_version': '3.0.0',
     'install_mode': True,  # 是否使用安装模式
     'data_dir_name': '空间规划政策爬虫系统',  # 数据目录名称
 }
 
 # 数据库配置
 DATABASE_CONFIG = {
-    'max_display_count': 1000,  # 最大显示数量
-    'max_crawl_pages': 50,      # 最大爬取页数
+    'max_display_count': 100000,  # 最大显示数量（取消限制）
+    'max_crawl_pages': 999999,  # 最大爬取页数（无上限）
     'timeout': 10,              # 网络请求超时时间
     'backup_enabled': True,     # 是否启用数据库备份
     'backup_interval': 7,       # 备份间隔（天）
@@ -34,14 +34,14 @@ SPIDER_CONFIG = {
     'max_retries': 3,
     'min_delay': 1.0,
     'max_delay': 3.0,
-    'max_requests_per_minute': 15,
+    'max_requests_per_minute': 999999,  # 无限制
 }
 
 # 防反爬虫配置
 ANTI_CRAWLER_CONFIG = {
     'enable_rotation': True,  # 是否启用会话轮换
     'enable_frequency_limit': True,  # 是否启用频率限制
-    'max_concurrent_requests': 5,  # 最大并发请求数
+    'max_concurrent_requests': 999,  # 最大并发请求数（无限制）
     'session_rotation_interval': 300,  # 会话轮换间隔（秒）
 }
 

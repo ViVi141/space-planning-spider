@@ -1,0 +1,9 @@
+{
+  "enabled": true,
+  "secret_id": "",
+  "secret_key": "",
+  "username": "",
+  "password": "",
+  "max_proxies": 10,
+  "check_interval": 300
+}

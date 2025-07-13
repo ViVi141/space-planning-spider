@@ -17,6 +17,7 @@ from space_planning.spider.national import NationalSpider
 from space_planning.utils.export import export_to_word
 from space_planning.utils.compare import PolicyComparer
 from space_planning.utils.compliance import ComplianceAnalyzer
+from space_planning.gui.crawler_status_dialog import CrawlerStatusDialog
 
 
 
@@ -29,7 +30,7 @@ class SearchThread(QThread):
     error_signal = pyqtSignal(str)     # 错误信号
     data_count_signal = pyqtSignal(int)  # 数据量信号
     
-    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None, main_window=None):
+    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None, main_window=None, use_multithread=False, thread_count=4):
         super().__init__()
         self.level = level
         self.keywords = keywords
@@ -41,6 +42,8 @@ class SearchThread(QThread):
         self.spider = spider  # 使用传入的spider实例
         self.main_window = main_window  # 保存主窗口引用，用于访问持久爬虫实例
         self.stop_flag = False  # 停止标志
+        self.use_multithread = use_multithread  # 是否使用多线程
+        self.thread_count = thread_count  # 线程数量
     
     def run(self):
         try:
@@ -59,7 +62,11 @@ class SearchThread(QThread):
                     if self.level == "住房和城乡建设部":
                         spider = self.main_window.national_spider
                     elif self.level == "广东省人民政府":
-                        spider = self.main_window.guangdong_spider
+                        # 根据是否启用多线程选择不同的爬虫实例
+                        if self.use_multithread:
+                            spider = self.main_window.guangdong_multithread_spider
+                        else:
+                            spider = self.main_window.guangdong_spider
                     elif self.level == "自然资源部":
                         spider = self.main_window.mnr_spider
                     else:
@@ -110,17 +117,46 @@ class SearchThread(QThread):
                     
                     # 调用爬虫方法
                     if self.level == "广东省人民政府":
-                        # 广东省爬虫使用快速方法（跳过分类遍历，大幅提升速度）
-                        new_policies = getattr(spider, 'crawl_policies_fast', 
-                                              getattr(spider, 'crawl_policies_optimized', spider.crawl_policies))(
-                            keywords=self.keywords,
-                            callback=progress_callback,
-                            start_date=self.start_date,
-                            end_date=self.end_date,
-                            speed_mode=self.speed_mode,
-                            disable_speed_limit=disable_speed_limit,
-                            stop_callback=lambda: self.stop_flag
-                        )
+                        # 检查是否使用多线程爬虫
+                        if self.use_multithread:
+                            # 检查是否有多线程爬虫类
+                            if hasattr(spider, 'crawl_policies_multithread'):
+                                self.progress_signal.emit(f"🚀 启用多线程爬取，使用 {self.thread_count} 个线程")
+                                new_policies = spider.crawl_policies_multithread(
+                                    keywords=self.keywords,
+                                    callback=progress_callback,
+                                    start_date=self.start_date,
+                                    end_date=self.end_date,
+                                    speed_mode=self.speed_mode,
+                                    disable_speed_limit=disable_speed_limit,
+                                    stop_callback=lambda: self.stop_flag,
+                                    max_workers=self.thread_count
+                                )
+                            else:
+                                # 如果没有多线程方法，回退到单线程
+                                self.progress_signal.emit("⚠️ 多线程爬虫不可用，回退到单线程模式")
+                                new_policies = getattr(spider, 'crawl_policies_fast', 
+                                                      getattr(spider, 'crawl_policies_optimized', spider.crawl_policies))(
+                                    keywords=self.keywords,
+                                    callback=progress_callback,
+                                    start_date=self.start_date,
+                                    end_date=self.end_date,
+                                    speed_mode=self.speed_mode,
+                                    disable_speed_limit=disable_speed_limit,
+                                    stop_callback=lambda: self.stop_flag
+                                )
+                        else:
+                            # 广东省爬虫使用快速方法（跳过分类遍历，大幅提升速度）
+                            new_policies = getattr(spider, 'crawl_policies_fast', 
+                                                  getattr(spider, 'crawl_policies_optimized', spider.crawl_policies))(
+                                keywords=self.keywords,
+                                callback=progress_callback,
+                                start_date=self.start_date,
+                                end_date=self.end_date,
+                                speed_mode=self.speed_mode,
+                                disable_speed_limit=disable_speed_limit,
+                                stop_callback=lambda: self.stop_flag
+                            )
                     else:
                         # 其他爬虫使用标准方法
                         new_policies = spider.crawl_policies(
@@ -181,12 +217,13 @@ class MainWindow(QMainWindow):
         
         # 创建共享的爬虫实例
         from space_planning.spider.national import NationalSpider
-        from space_planning.spider.guangdong import GuangdongSpider
+        from space_planning.spider.guangdong import GuangdongSpider, GuangdongMultiThreadSpider
         from space_planning.spider.mnr import MNRSpider
         
         # 为每个机构创建持久的爬虫实例，保持监控数据
         self.national_spider = NationalSpider()
         self.guangdong_spider = GuangdongSpider()
+        self.guangdong_multithread_spider = GuangdongMultiThreadSpider(max_workers=4)  # 创建多线程爬虫实例
         self.mnr_spider = MNRSpider()
         
         # 默认使用国家级爬虫
@@ -231,6 +268,11 @@ class MainWindow(QMainWindow):
             crawler_settings_action = QAction('爬虫设置', self)
             crawler_settings_action.triggered.connect(self.show_crawler_settings)
             settings_menu.addAction(crawler_settings_action)
+            
+            # 代理设置菜单项
+            proxy_settings_action = QAction('代理设置', self)
+            proxy_settings_action.triggered.connect(self.show_proxy_settings)
+            settings_menu.addAction(proxy_settings_action)
         
         if help_menu is not None:
             # 帮助菜单
@@ -280,6 +322,9 @@ class MainWindow(QMainWindow):
             print(f"动态加载爬虫机构失败: {e}")
             # 降级方案：只显示已实现的爬虫
             self.level_combo.addItems(["住房和城乡建设部", "广东省人民政府", "自然资源部"])
+        
+        # 连接机构选择变化事件
+        self.level_combo.currentTextChanged.connect(self.on_level_changed)
         
         self.keyword_edit = QLineEdit()
         self.keyword_edit.setPlaceholderText("请输入项目关键词，如'控制性详细规划'、'建设用地'...")
@@ -336,10 +381,31 @@ class MainWindow(QMainWindow):
         self.speed_combo.setStyleSheet("color: #666; font-size: 12px;")
         self.speed_combo.setMaximumWidth(100)
         
+        # 多线程选项
+        self.multithread_checkbox = QCheckBox("启用多线程")
+        self.multithread_checkbox.setChecked(False)  # 默认关闭
+        self.multithread_checkbox.setToolTip("启用多线程爬取，可大幅提升爬取速度（仅广东省支持）")
+        self.multithread_checkbox.setStyleSheet("color: #666; font-size: 12px;")
+        
+        # 线程数选择
+        self.thread_count_combo = QComboBox()
+        self.thread_count_combo.addItems(["2", "4", "6", "8", "10"])
+        self.thread_count_combo.setCurrentText("4")
+        self.thread_count_combo.setToolTip("选择线程数量，建议4-8个线程")
+        self.thread_count_combo.setStyleSheet("color: #666; font-size: 12px;")
+        self.thread_count_combo.setMaximumWidth(60)
+        self.thread_count_combo.setEnabled(False)  # 默认禁用
+        
+        # 连接多线程选项变化
+        self.multithread_checkbox.stateChanged.connect(self.on_multithread_changed)
+        
         row3_layout.addStretch()
         row3_layout.addWidget(self.anti_crawler_checkbox)
         row3_layout.addWidget(QLabel("查询速度："))
         row3_layout.addWidget(self.speed_combo)
+        row3_layout.addWidget(self.multithread_checkbox)
+        row3_layout.addWidget(QLabel("线程数："))
+        row3_layout.addWidget(self.thread_count_combo)
         
         # 表格自动滚动选项
         self.auto_scroll_checkbox = QCheckBox("表格自动滚动")
@@ -584,6 +650,32 @@ class MainWindow(QMainWindow):
             self.start_date_edit.setDate(QDate.currentDate())
             self.end_date_edit.setDate(QDate.currentDate())
 
+    def on_multithread_changed(self, state):
+        """多线程选项变化事件"""
+        is_enabled = state == Qt.Checked
+        self.thread_count_combo.setEnabled(is_enabled)
+        
+        # 检查当前选择的机构是否支持多线程
+        current_level = self.level_combo.currentText()
+        if is_enabled and current_level != "广东省人民政府":
+            QMessageBox.warning(self, "提示", "多线程功能目前仅支持广东省人民政府爬虫")
+            self.multithread_checkbox.setChecked(False)
+            self.thread_count_combo.setEnabled(False)
+            return
+        
+        if is_enabled:
+            self.progress_label.setText("已启用多线程爬取")
+        else:
+            self.progress_label.setText("已禁用多线程爬取")
+    
+    def on_level_changed(self, level):
+        """机构选择变化事件"""
+        # 如果当前启用了多线程，但选择的不是广东省，则禁用多线程
+        if self.multithread_checkbox.isChecked() and level != "广东省人民政府":
+            self.multithread_checkbox.setChecked(False)
+            self.thread_count_combo.setEnabled(False)
+            QMessageBox.information(self, "提示", f"已自动禁用多线程功能，因为{level}暂不支持多线程爬取")
+
     def on_smart_search(self):
         """智能查询：自动判断数据来源，一键获取最新结果"""
         # 如果正在搜索，则停止搜索
@@ -648,11 +740,15 @@ class MainWindow(QMainWindow):
                 self.progress_label.setText(f"{priority_msg} - 正在准备爬取...")
                 QApplication.processEvents()
             
+            # 获取多线程设置
+            use_multithread = self.multithread_checkbox.isChecked()
+            thread_count = int(self.thread_count_combo.currentText())
+            
             # 创建并启动搜索线程
             self.current_data = [] # 清空当前数据
             self.refresh_table([]) # 清空表格
             # 传递None给SearchThread，让它根据level动态创建爬虫
-            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode, None, self)
+            self.search_thread = SearchThread(level, keywords, need_crawl, start_date, end_date, enable_anti_crawler, speed_mode, None, self, use_multithread, thread_count)
             self.search_thread.progress_signal.connect(self.update_progress)
             self.search_thread.result_signal.connect(self.update_results)
             self.search_thread.single_policy_signal.connect(self.on_new_policy) # 新增信号连接
@@ -701,13 +797,8 @@ class MainWindow(QMainWindow):
         else:
             print(f"更新查询结果: 当前 {len(self.current_data)} 条 -> 新结果 {len(results)} 条")
         
-        # 限制最大显示数量，避免内存占用过高
-        max_display = 1000
-        if len(results) > max_display:
-            self.current_data = list(results[:max_display])
-            QMessageBox.information(self, "提示", f"结果较多，仅显示前{max_display}条数据")
-        else:
-            self.current_data = list(results)
+        # 取消数据限制，显示所有结果
+        self.current_data = list(results)
         
         self.refresh_table(self.current_data) # 刷新表格
         QApplication.processEvents()
@@ -1589,18 +1680,19 @@ class MainWindow(QMainWindow):
             self.full_text.setFocus()
     
     def show_crawler_status(self):
-        """显示爬虫状态实时监控"""
-        try:
-            from space_planning.gui.crawler_status_dialog import CrawlerStatusDialog
-            # 传递所有爬虫实例到监控对话框
-            dialog = CrawlerStatusDialog(self, {
-                'national_spider': self.national_spider,
-                'guangdong_spider': self.guangdong_spider,
-                'mnr_spider': self.mnr_spider
-            })
-            dialog.show()  # 使用show()而不是exec_()，保持非模态
-        except Exception as e:
-            QMessageBox.warning(self, "错误", f"打开爬虫状态监控失败: {str(e)}")
+        """显示爬虫状态"""
+        if hasattr(self, 'crawler_status_dialog'):
+            self.crawler_status_dialog.close()
+        
+        if hasattr(self, 'search_thread') and self.search_thread.isRunning():
+            # 使用搜索线程中的爬虫
+            crawler = self.search_thread.spider
+        else:
+            # 使用默认爬虫
+            crawler = self.spider
+        
+        self.crawler_status_dialog = CrawlerStatusDialog(crawler, self)
+        self.crawler_status_dialog.show()
     
     def show_database_manager(self):
         """显示数据库管理对话框"""
@@ -1622,6 +1714,17 @@ class MainWindow(QMainWindow):
             dialog.exec_()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开爬虫设置对话框：{e}")
+    
+    def show_proxy_settings(self):
+        """显示代理设置对话框"""
+        try:
+            from .proxy_settings_dialog import ProxySettingsDialog
+            dialog = ProxySettingsDialog(self)
+            if dialog.exec_() == QDialog.Accepted:
+                # 代理设置已在对话框中更新并初始化
+                QMessageBox.information(self, "成功", "代理设置已更新")
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"打开代理设置对话框失败: {e}")
     
     def on_settings_changed(self):
         """设置改变事件"""

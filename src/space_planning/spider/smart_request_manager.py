@@ -17,8 +17,69 @@ from .config import crawler_config, AntiDetectionMode
 from .advanced_anti_detection import AdvancedAntiDetection
 from .javascript_fingerprint import JavaScriptFingerprint
 
+class RetryStrategy:
+    """智能重试策略"""
+    def __init__(self, max_retries=3, base_delay=1, max_delay=30):
+        self.max_retries = max_retries  # 最大重试次数
+        self.base_delay = base_delay    # 基础延迟（秒）
+        self.max_delay = max_delay      # 最大延迟（秒）
+        self.retry_count = 0            # 当前重试次数
+        self.last_error = None          # 最后一次错误
+        self.error_counts = {}          # 错误类型统计
+    
+    def should_retry(self, error) -> bool:
+        """判断是否应该重试"""
+        # 记录错误
+        error_type = type(error).__name__
+        self.error_counts[error_type] = self.error_counts.get(error_type, 0) + 1
+        self.last_error = error
+        
+        # 超过最大重试次数
+        if self.retry_count >= self.max_retries:
+            return False
+        
+        # 判断错误类型是否可重试
+        if isinstance(error, (requests.exceptions.Timeout,
+                            requests.exceptions.ConnectionError,
+                            requests.exceptions.ProxyError,
+                            requests.exceptions.SSLError,
+                            requests.exceptions.ChunkedEncodingError)):
+            return True
+        
+        # 特定HTTP状态码可重试
+        if isinstance(error, requests.exceptions.HTTPError):
+            status_code = error.response.status_code
+            return status_code in [429, 500, 502, 503, 504]
+        
+        return False
+    
+    def get_delay(self) -> float:
+        """获取重试延迟时间（指数退避）"""
+        delay = min(self.base_delay * (2 ** self.retry_count), self.max_delay)
+        # 添加随机抖动，避免多个请求同时重试
+        jitter = random.uniform(0, 0.1 * delay)
+        return delay + jitter
+    
+    def increment(self):
+        """增加重试计数"""
+        self.retry_count += 1
+    
+    def reset(self):
+        """重置重试状态"""
+        self.retry_count = 0
+        self.last_error = None
+    
+    @property
+    def stats(self) -> Dict:
+        """获取重试统计信息"""
+        return {
+            'retry_count': self.retry_count,
+            'last_error': str(self.last_error) if self.last_error else None,
+            'error_counts': self.error_counts
+        }
+
 class SmartRequestManager:
-    """智能请求管理器（无代理池）"""
+    """智能请求管理器"""
     
     def __init__(self):
         # 初始化组件
@@ -39,6 +100,7 @@ class SmartRequestManager:
         
         # 初始化会话
         self._initialize_session()
+        self.retry_strategy = RetryStrategy()
     
     def _initialize_session(self):
         """初始化会话"""
@@ -188,13 +250,91 @@ class SmartRequestManager:
                 'timestamp': datetime.now()
             })
             
-            # 保持历史记录在合理范围内
-            if len(self.request_history) > 1000:
-                self.request_history = self.request_history[-500:]
+            # 保持历史记录在合理范围内（取消限制）
+            if len(self.request_history) > 10000:
+                self.request_history = self.request_history[-5000:]
     
-    def get_page(self, url: str, headers: Optional[Dict] = None) -> Tuple[requests.Response, Dict]:
-        """获取页面（无代理池）"""
-        return self.make_request(url, headers=headers)
+    def get_page(self, url: str, headers: Optional[Dict] = None, use_proxy: bool = True) -> Tuple[requests.Response, Dict]:
+        """获取页面（带重试机制）"""
+        self.retry_strategy.reset()
+        start_time = time.time()
+        
+        while True:
+            try:
+                # 准备请求信息
+                request_info = {
+                    'proxy_used': False,  # 基础请求管理器不支持代理
+                    'proxy_ip': None,
+                    'proxy_port': None,
+                    'retry_count': self.retry_strategy.retry_count,
+                }
+                
+                # 发送请求
+                response = requests.get(
+                    url,
+                    headers=headers or self.get_headers(),
+                    timeout=30,
+                    verify=True
+                )
+                response.raise_for_status()
+                
+                # 计算响应时间
+                response_time = time.time() - start_time
+                request_info['response_time'] = response_time
+                
+                # 记录成功
+                self.record_success(url, response_time)
+                
+                return response, request_info
+                
+            except Exception as e:
+                # 计算当前尝试的响应时间
+                current_response_time = time.time() - start_time
+                
+                # 判断是否需要重试
+                if not self.retry_strategy.should_retry(e):
+                    # 记录失败
+                    self.record_failure(url, str(e))
+                    raise
+                
+                # 获取重试延迟时间
+                delay = self.retry_strategy.get_delay()
+                
+                # 记录重试信息
+                self.logger.warning(
+                    f"请求失败 (重试 {self.retry_strategy.retry_count + 1}/{self.retry_strategy.max_retries}): "
+                    f"URL={url}, 错误={str(e)}, 延迟={delay:.1f}秒"
+                )
+                
+                # 增加重试计数
+                self.retry_strategy.increment()
+                
+                # 等待重试
+                time.sleep(delay)
+                
+                # 更新开始时间
+                start_time = time.time()
+    
+    def record_success(self, url: str, response_time: float):
+        """记录成功请求"""
+        self.logger.info(f"请求成功: URL={url}, 响应时间={response_time:.2f}秒, "
+                        f"重试次数={self.retry_strategy.retry_count}")
+    
+    def record_failure(self, url: str, error: str):
+        """记录失败请求"""
+        stats = self.retry_strategy.stats
+        self.logger.error(
+            f"请求最终失败: URL={url}, 错误={error}, "
+            f"重试次数={stats['retry_count']}, "
+            f"错误统计={stats['error_counts']}"
+        )
+    
+    def get_request_stats(self) -> Dict:
+        """获取请求统计信息"""
+        stats = super().get_request_stats()
+        # 添加重试统计
+        stats['retry_stats'] = self.retry_strategy.stats
+        return stats
     
     def get_page_with_behavior(self, url: str, behavior_type: Optional[str] = None) -> Tuple[requests.Response, Dict]:
         """获取页面并模拟行为（无代理池）"""

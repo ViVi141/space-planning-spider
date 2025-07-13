@@ -18,6 +18,10 @@ from bs4 import BeautifulSoup, Tag
 from urllib.parse import urljoin, urlparse
 import urllib3
 import hashlib
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import copy
 
 # 启用SSL安全验证
 # 移除SSL警告禁用，确保安全连接
@@ -100,55 +104,139 @@ class GuangdongSpider:
             self.monitor.record_request(self.base_url, success=False, error_type=str(e))
             print(f"访问首页异常: {e}")
     
+    def _rotate_session(self):
+        """轮换会话，避免访问限制"""
+        print("轮换会话，避免访问限制...")
+        
+        # 创建新的会话
+        new_session = requests.Session()
+        new_session.headers.update(self.headers)
+        
+        # 生成新的JSESSIONID
+        import random
+        import string
+        new_jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        new_session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
+        
+        # 访问首页获取新的Cookie
+        try:
+            resp = new_session.get(self.base_url, timeout=10)
+            if resp.status_code == 200:
+                print("成功轮换会话")
+                self.session = new_session
+                return True
+            else:
+                print(f"轮换会话失败，状态码: {resp.status_code}")
+                return False
+        except Exception as e:
+            print(f"轮换会话异常: {e}")
+            return False
+    
+    def _handle_access_limit(self, response_text):
+        """处理访问限制"""
+        if "您已超过全文最大访问数" in response_text or "访问限制" in response_text:
+            print("检测到访问限制，尝试轮换会话...")
+            if self._rotate_session():
+                print("会话轮换成功，继续爬取")
+                return True
+            else:
+                print("会话轮换失败，等待后重试...")
+                import time
+                time.sleep(30)  # 等待30秒
+                return self._rotate_session()
+        return False
+    
     def _request_page_with_check(self, page_index, search_params, old_page_index=None):
         """带翻页校验的页面请求"""
-        try:
-            # 1. 先请求翻页校验接口
-            check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
-            check_headers = self.headers.copy()
-            check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-            
-            print(f"请求翻页校验接口: 第{page_index}页")
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
             try:
-                check_resp = self.session.post(check_url, headers=check_headers, timeout=15)
-                if check_resp.status_code == 200:
-                    self.monitor.record_request(check_url, success=True)
-                else:
-                    self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
-                print(f"翻页校验响应状态码: {check_resp.status_code}")
-            except Exception as check_error:
-                self.monitor.record_request(check_url, success=False, error_type=str(check_error))
-                print(f"翻页校验请求失败: {check_error}")
-                # 翻页校验失败不影响主请求，继续执行
-            
-            # 2. 再请求数据接口
-            search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
-            search_headers = self.headers.copy()
-            search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-            
-            # 更新搜索参数中的OldPageIndex
-            if old_page_index is not None:
-                search_params['OldPageIndex'] = str(old_page_index)
-            
-            print(f"请求数据接口: 第{page_index}页")
-            search_resp = self.session.post(search_url, data=search_params, headers=search_headers, timeout=30)
-            
-            print(f"数据接口响应状态码: {search_resp.status_code}")
-            
-            if search_resp.status_code == 200:
-                self.monitor.record_request(search_url, success=True)
-                print(f"第{page_index}页请求成功")
-                return search_resp
-            else:
-                self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
-                print(f"数据请求失败，状态码: {search_resp.status_code}")
-                return None
+                # 1. 先请求翻页校验接口
+                check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
+                check_headers = self.headers.copy()
+                check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                 
-        except Exception as e:
-            print(f"页面请求异常: {e}")
-            import traceback
-            print(f"详细错误信息: {traceback.format_exc()}")
-            return None
+                print(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                try:
+                    check_resp = self.session.post(check_url, headers=check_headers, timeout=15)
+                    if check_resp.status_code == 200:
+                        self.monitor.record_request(check_url, success=True)
+                    else:
+                        self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
+                    print(f"翻页校验响应状态码: {check_resp.status_code}")
+                except Exception as check_error:
+                    self.monitor.record_request(check_url, success=False, error_type=str(check_error))
+                    print(f"翻页校验请求失败: {check_error}")
+                    # 翻页校验失败不影响主请求，继续执行
+                
+                # 2. 再请求数据接口
+                search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
+                search_headers = self.headers.copy()
+                search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+                
+                # 更新搜索参数中的OldPageIndex
+                if old_page_index is not None:
+                    search_params['OldPageIndex'] = str(old_page_index)
+                
+                print(f"请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                search_resp = self.session.post(search_url, data=search_params, headers=search_headers, timeout=30)
+                
+                print(f"数据接口响应状态码: {search_resp.status_code}")
+                
+                if search_resp.status_code == 200:
+                    # 检查响应内容是否包含访问限制
+                    response_text = search_resp.text
+                    if self._handle_access_limit(response_text):
+                        print(f"检测到访问限制，已轮换会话，重试第{page_index}页")
+                        retry_count += 1
+                        import time
+                        time.sleep(5)  # 等待5秒后重试
+                        continue
+                    
+                    self.monitor.record_request(search_url, success=True)
+                    print(f"第{page_index}页请求成功")
+                    return search_resp
+                else:
+                    self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
+                    print(f"数据请求失败，状态码: {search_resp.status_code}")
+                    
+                    # 如果是403或429错误，尝试轮换会话
+                    if search_resp.status_code in [403, 429]:
+                        print(f"检测到HTTP {search_resp.status_code}错误，尝试轮换会话...")
+                        if self._rotate_session():
+                            retry_count += 1
+                            import time
+                            time.sleep(10)  # 等待10秒后重试
+                            continue
+                    
+                    return None
+                    
+            except Exception as e:
+                print(f"页面请求异常: {e}")
+                import traceback
+                print(f"详细错误信息: {traceback.format_exc()}")
+                
+                # 如果是网络相关错误，尝试轮换会话
+                if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    print("检测到网络错误，尝试轮换会话...")
+                    if self._rotate_session():
+                        retry_count += 1
+                        import time
+                        time.sleep(10)  # 等待10秒后重试
+                        continue
+                
+                retry_count += 1
+                if retry_count < max_retries:
+                    import time
+                    time.sleep(15)  # 等待15秒后重试
+                    continue
+                else:
+                    print(f"第{page_index}页请求失败，已达到最大重试次数")
+                    return None
+        
+        return None
     
     def _get_all_categories(self):
         """获取所有分类信息 - 基于网站层级结构分析结果"""
@@ -441,10 +529,10 @@ class GuangdongSpider:
             
             # 爬取当前分类的所有页面
             page_index = 1
-            max_pages = 50  # 增加最大页数限制，确保能获取更多数据
+            max_pages = 999999  # 最大页数限制（无上限）
             category_policies = []
             empty_page_count = 0  # 连续空页计数
-            max_empty_pages = 3   # 最大连续空页数
+            max_empty_pages = 10   # 最大连续空页数（增加容忍度）
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -1556,10 +1644,10 @@ class GuangdongSpider:
             
             # 爬取当前分类的所有页面
             page_index = 1
-            max_pages = 100  # 增加最大页数限制
+            max_pages = 999999  # 最大页数限制（无上限）
             category_policies = []
             empty_page_count = 0
-            max_empty_pages = 5  # 增加连续空页容忍度
+            max_empty_pages = 15  # 增加连续空页容忍度（进一步增加）
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -1707,7 +1795,7 @@ class GuangdongSpider:
             callback(f"爬取完成！总爬取: {total_crawled} 条，过滤后: {total_filtered} 条，最终保存: {total_saved} 条")
         
         return unique_policies
-
+    
     def crawl_policies_fast(self, keywords=None, callback=None, start_date=None, end_date=None, 
                            speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
         """广东省政策快速爬取方法 - 跳过分类遍历，直接搜索"""
@@ -1736,36 +1824,40 @@ class GuangdongSpider:
         total_filtered = 0
         total_saved = 0
         
-        # 设置速度模式 - 快速模式下使用更激进的设置
+        # 会话轮换计数器
+        session_rotation_counter = 0
+        max_requests_per_session = 50  # 每50个请求轮换一次会话
+        
+        # 设置速度模式 - 增加延迟避免访问限制
         self.speed_mode = speed_mode
         if disable_speed_limit:
-            delay_range = (0.0, 0.1)  # 几乎无延迟
+            delay_range = (1.0, 3.0)  # 增加延迟避免访问限制
         elif speed_mode == "快速模式":
-            delay_range = (0.1, 0.3)
+            delay_range = (2.0, 5.0)  # 增加延迟
         elif speed_mode == "慢速模式":
-            delay_range = (1.0, 2.0)
+            delay_range = (5.0, 10.0)  # 更慢的延迟
         else:  # 正常速度
-            delay_range = (0.2, 0.5)
+            delay_range = (3.0, 7.0)  # 增加正常延迟
         
         all_policies = []
         
-        # 直接使用最有效的搜索策略，跳过分类遍历
-        print("使用快速搜索策略...")
+        # 使用多种搜索策略，确保获取更多数据
+        print("使用多种搜索策略...")
         if callback:
-            callback("使用快速搜索策略...")
+            callback("使用多种搜索策略...")
         
         # 策略1：使用高级搜索表单（最有效）
         try:
-            print("尝试高级搜索表单...")
+            print("策略1：尝试高级搜索表单...")
             if callback:
-                callback("尝试高级搜索表单...")
+                callback("策略1：尝试高级搜索表单...")
             
             # 使用更大的页面大小减少翻页次数
             page_size = 50  # 增加页面大小
             page_index = 1
-            max_pages = 50  # 减少最大页数
+            max_pages = 999999  # 最大页数限制（无上限）
             empty_page_count = 0
-            max_empty_pages = 3
+            max_empty_pages = 10  # 增加连续空页容忍度，避免过早停止
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -1815,6 +1907,16 @@ class GuangdongSpider:
                     
                     # 更新总爬取数量
                     total_crawled += len(page_policies)
+                    
+                    # 会话轮换逻辑
+                    session_rotation_counter += 1
+                    if session_rotation_counter >= max_requests_per_session:
+                        print(f"已请求 {session_rotation_counter} 次，轮换会话...")
+                        if self._rotate_session():
+                            session_rotation_counter = 0
+                            print("会话轮换成功")
+                        else:
+                            print("会话轮换失败，继续使用当前会话")
                     
                     if callback:
                         callback(f"第 {page_index} 页获取 {len(page_policies)} 条政策（累计爬取: {total_crawled} 条）")
@@ -1885,14 +1987,210 @@ class GuangdongSpider:
                         callback(f"页面处理出错，跳过继续...")
                     break
             
-            print(f"快速搜索完成，共获取 {len(all_policies)} 条政策")
+            print(f"策略1完成，共获取 {len(all_policies)} 条政策")
             if callback:
-                callback(f"快速搜索完成，共获取 {len(all_policies)} 条政策")
+                callback(f"策略1完成，共获取 {len(all_policies)} 条政策")
                 
         except Exception as e:
-            print(f"快速搜索策略失败: {e}")
+            print(f"策略1失败: {e}")
             if callback:
-                callback(f"快速搜索策略失败，尝试备用策略...")
+                callback(f"策略1失败，尝试策略2...")
+        
+        # 策略2：尝试不同的搜索参数组合
+        if len(all_policies) < 10000:  # 如果数据量不够，尝试策略2
+            try:
+                print("策略2：尝试不同的搜索参数组合...")
+                if callback:
+                    callback("策略2：尝试不同的搜索参数组合...")
+                
+                # 使用不同的页面大小
+                page_size_2 = 100  # 尝试更大的页面大小
+                page_index_2 = 1
+                empty_page_count_2 = 0
+                max_empty_pages_2 = 15  # 进一步增加容忍度
+                
+                while page_index_2 <= 500 and empty_page_count_2 < max_empty_pages_2:  # 限制500页避免无限循环
+                    if stop_callback and stop_callback():
+                        print("用户已停止爬取")
+                        break
+                    
+                    try:
+                        # 使用不同的搜索参数
+                        post_data_2 = self._get_search_parameters(
+                            keywords=keywords,
+                            category_code=None,
+                            page_index=page_index_2,
+                            page_size=page_size_2,
+                            start_date=start_date,
+                            end_date=end_date,
+                            old_page_index=page_index_2 - 1 if page_index_2 > 1 else None
+                        )
+                        
+                        search_keyword = ' '.join(keywords) if keywords else ''
+                        print(f"策略2搜索: '{search_keyword}', 页码: {page_index_2}, 页面大小: {page_size_2}")
+                        if callback:
+                            callback(f"策略2：正在请求第 {page_index_2} 页...")
+                        
+                        resp_2 = self._request_page_with_check(page_index_2, post_data_2, page_index_2 - 1 if page_index_2 > 1 else None)
+                        
+                        if not resp_2:
+                            print(f"策略2第{page_index_2}页请求失败")
+                            break
+                        
+                        soup_2 = BeautifulSoup(resp_2.content, 'html.parser')
+                        page_policies_2 = self._parse_policy_list_optimized(soup_2, callback, stop_callback, "策略2搜索")
+                        
+                        if len(page_policies_2) == 0:
+                            empty_page_count_2 += 1
+                            print(f"策略2第 {page_index_2} 页未获取到政策，连续空页: {empty_page_count_2}")
+                            if empty_page_count_2 >= max_empty_pages_2:
+                                print(f"策略2连续 {max_empty_pages_2} 页无数据，停止翻页")
+                                break
+                        else:
+                            empty_page_count_2 = 0
+                        
+                        total_crawled += len(page_policies_2)
+                        
+                        # 策略2的会话轮换逻辑
+                        session_rotation_counter += 1
+                        if session_rotation_counter >= max_requests_per_session:
+                            print(f"策略2已请求 {session_rotation_counter} 次，轮换会话...")
+                            if self._rotate_session():
+                                session_rotation_counter = 0
+                                print("策略2会话轮换成功")
+                            else:
+                                print("策略2会话轮换失败，继续使用当前会话")
+                        
+                        if callback:
+                            callback(f"策略2第 {page_index_2} 页获取 {len(page_policies_2)} 条政策（累计爬取: {total_crawled} 条）")
+                        
+                        # 过滤和添加政策
+                        filtered_policies_2 = []
+                        for policy in page_policies_2:
+                            if keywords and not self._is_policy_match_keywords(policy, keywords):
+                                continue
+                            
+                            if enable_time_filter:
+                                if self._is_policy_in_date_range(policy, dt_start, dt_end):
+                                    filtered_policies_2.append(policy)
+                            else:
+                                filtered_policies_2.append(policy)
+                        
+                        total_filtered += len(filtered_policies_2)
+                        all_policies.extend(filtered_policies_2)
+                        
+                        if callback:
+                            callback(f"策略2第 {page_index_2} 页保留 {len(filtered_policies_2)} 条政策（累计: {total_filtered} 条）")
+                        
+                        page_index_2 += 1
+                        
+                        if not disable_speed_limit:
+                            delay = random.uniform(*delay_range)
+                            time.sleep(delay)
+                            
+                    except Exception as e:
+                        print(f"策略2请求失败: {e}")
+                        break
+                
+                print(f"策略2完成，累计获取 {len(all_policies)} 条政策")
+                if callback:
+                    callback(f"策略2完成，累计获取 {len(all_policies)} 条政策")
+                    
+            except Exception as e:
+                print(f"策略2失败: {e}")
+                if callback:
+                    callback(f"策略2失败，继续处理已获取的数据...")
+        
+        # 策略3：如果数据量仍然不够，尝试分类遍历
+        if len(all_policies) < 15000:  # 如果数据量仍然不够，尝试分类遍历
+            try:
+                print("策略3：尝试分类遍历获取更多数据...")
+                if callback:
+                    callback("策略3：尝试分类遍历获取更多数据...")
+                
+                # 获取所有分类
+                categories = self._get_flat_categories()
+                print(f"找到 {len(categories)} 个分类")
+                
+                for category_name, category_code in categories:
+                    if stop_callback and stop_callback():
+                        break
+                    
+                    if callback:
+                        callback(f"策略3：正在爬取分类 {category_name}...")
+                    
+                    # 为每个分类爬取数据
+                    category_policies = []
+                    page_index_3 = 1
+                    empty_page_count_3 = 0
+                    max_empty_pages_3 = 8
+                    
+                    while page_index_3 <= 100 and empty_page_count_3 < max_empty_pages_3:  # 每个分类最多100页
+                        try:
+                            post_data_3 = self._get_search_parameters(
+                                keywords=keywords,
+                                category_code=category_code,
+                                page_index=page_index_3,
+                                page_size=20,
+                                start_date=start_date,
+                                end_date=end_date
+                            )
+                            
+                            resp_3 = self._request_page_with_check(page_index_3, post_data_3, page_index_3 - 1 if page_index_3 > 1 else None)
+                            
+                            if not resp_3:
+                                break
+                            
+                            soup_3 = BeautifulSoup(resp_3.content, 'html.parser')
+                            page_policies_3 = self._parse_policy_list_optimized(soup_3, callback, stop_callback, category_name)
+                            
+                            if len(page_policies_3) == 0:
+                                empty_page_count_3 += 1
+                                if empty_page_count_3 >= max_empty_pages_3:
+                                    break
+                            else:
+                                empty_page_count_3 = 0
+                            
+                            # 过滤和添加政策
+                            for policy in page_policies_3:
+                                if keywords and not self._is_policy_match_keywords(policy, keywords):
+                                    continue
+                                
+                                if enable_time_filter:
+                                    if self._is_policy_in_date_range(policy, dt_start, dt_end):
+                                        category_policies.append(policy)
+                                else:
+                                    category_policies.append(policy)
+                            
+                            if callback:
+                                callback(f"策略3分类[{category_name}]第{page_index_3}页获取{len(page_policies_3)}条政策")
+                            
+                            page_index_3 += 1
+                            
+                            if not disable_speed_limit:
+                                delay = random.uniform(*delay_range)
+                                time.sleep(delay)
+                                
+                        except Exception as e:
+                            print(f"策略3分类[{category_name}]请求失败: {e}")
+                            break
+                    
+                    # 添加分类政策到总列表
+                    all_policies.extend(category_policies)
+                    total_crawled += len(category_policies)
+                    total_filtered += len(category_policies)
+                    
+                    if callback:
+                        callback(f"策略3分类[{category_name}]完成，获取{len(category_policies)}条政策")
+                
+                print(f"策略3完成，累计获取 {len(all_policies)} 条政策")
+                if callback:
+                    callback(f"策略3完成，累计获取 {len(all_policies)} 条政策")
+                    
+            except Exception as e:
+                print(f"策略3失败: {e}")
+                if callback:
+                    callback(f"策略3失败，继续处理已获取的数据...")
         
         # 应用去重机制
         print("应用数据去重...")
@@ -1915,10 +2213,498 @@ class GuangdongSpider:
         
         return unique_policies
 
-# 为兼容性添加别名类
+class GuangdongMultiThreadSpider(GuangdongSpider):
+    """广东省政策多线程爬虫 - 支持并行爬取多个分类"""
+    
+    def __init__(self, max_workers=4):
+        super().__init__()
+        self.max_workers = max_workers
+        self.thread_local = threading.local()
+        self.result_queue = queue.Queue()
+        self.error_queue = queue.Queue()
+        self.stats_lock = threading.Lock()
+        self.stats = {
+            'total_crawled': 0,
+            'total_filtered': 0,
+            'total_saved': 0,
+            'active_threads': 0,
+            'completed_categories': 0,
+            'failed_categories': 0
+        }
+    
+    def _get_thread_session(self):
+        """为每个线程获取独立的会话"""
+        if not hasattr(self.thread_local, 'session'):
+            # 创建新的会话
+            session = requests.Session()
+            session.headers.update(self.headers)
+            
+            # 生成唯一的JSESSIONID
+            import random
+            import string
+            jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+            session.cookies.set('JSESSIONID', jsessionid, domain='gd.pkulaw.com')
+            
+            # 访问首页获取必要的Cookie
+            try:
+                resp = session.get(self.base_url, timeout=10)
+                if resp.status_code == 200:
+                    print(f"线程 {threading.current_thread().name} 成功初始化会话")
+                else:
+                    print(f"线程 {threading.current_thread().name} 初始化会话失败，状态码: {resp.status_code}")
+            except Exception as e:
+                print(f"线程 {threading.current_thread().name} 初始化会话异常: {e}")
+            
+            self.thread_local.session = session
+        
+        return self.thread_local.session
+    
+    def _rotate_thread_session(self):
+        """轮换线程会话"""
+        thread_name = threading.current_thread().name
+        print(f"线程 {thread_name} 轮换会话...")
+        
+        # 创建新的会话
+        new_session = requests.Session()
+        new_session.headers.update(self.headers)
+        
+        # 生成新的JSESSIONID
+        import random
+        import string
+        new_jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        new_session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
+        
+        # 访问首页获取新的Cookie
+        try:
+            resp = new_session.get(self.base_url, timeout=10)
+            if resp.status_code == 200:
+                print(f"线程 {thread_name} 成功轮换会话")
+                self.thread_local.session = new_session
+                return True
+            else:
+                print(f"线程 {thread_name} 轮换会话失败，状态码: {resp.status_code}")
+                return False
+        except Exception as e:
+            print(f"线程 {thread_name} 轮换会话异常: {e}")
+            return False
+    
+    def _request_page_with_check_thread(self, page_index, search_params, old_page_index=None):
+        """线程安全的页面请求方法"""
+        session = self._get_thread_session()
+        thread_name = threading.current_thread().name
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # 1. 先请求翻页校验接口
+                check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
+                check_headers = self.headers.copy()
+                check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+                
+                print(f"线程 {thread_name} 请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                try:
+                    check_resp = session.post(check_url, headers=check_headers, timeout=15)
+                    if check_resp.status_code == 200:
+                        self.monitor.record_request(check_url, success=True)
+                    else:
+                        self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
+                    print(f"线程 {thread_name} 翻页校验响应状态码: {check_resp.status_code}")
+                except Exception as check_error:
+                    self.monitor.record_request(check_url, success=False, error_type=str(check_error))
+                    print(f"线程 {thread_name} 翻页校验请求失败: {check_error}")
+                
+                # 2. 再请求数据接口
+                search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
+                search_headers = self.headers.copy()
+                search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+                
+                # 更新搜索参数中的OldPageIndex
+                if old_page_index is not None:
+                    search_params['OldPageIndex'] = str(old_page_index)
+                
+                print(f"线程 {thread_name} 请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                search_resp = session.post(search_url, data=search_params, headers=search_headers, timeout=30)
+                
+                print(f"线程 {thread_name} 数据接口响应状态码: {search_resp.status_code}")
+                
+                if search_resp.status_code == 200:
+                    # 检查响应内容是否包含访问限制
+                    response_text = search_resp.text
+                    if "您已超过全文最大访问数" in response_text or "访问限制" in response_text:
+                        print(f"线程 {thread_name} 检测到访问限制，尝试轮换会话...")
+                        if self._rotate_thread_session():
+                            print(f"线程 {thread_name} 会话轮换成功，继续爬取")
+                            retry_count += 1
+                            time.sleep(5)  # 等待5秒后重试
+                            continue
+                        else:
+                            print(f"线程 {thread_name} 会话轮换失败，等待后重试...")
+                            time.sleep(30)  # 等待30秒
+                            if self._rotate_thread_session():
+                                retry_count += 1
+                                continue
+                            else:
+                                print(f"线程 {thread_name} 会话轮换彻底失败")
+                                return None
+                    
+                    self.monitor.record_request(search_url, success=True)
+                    print(f"线程 {thread_name} 第{page_index}页请求成功")
+                    return search_resp
+                else:
+                    self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
+                    print(f"线程 {thread_name} 数据请求失败，状态码: {search_resp.status_code}")
+                    
+                    # 如果是403或429错误，尝试轮换会话
+                    if search_resp.status_code in [403, 429]:
+                        print(f"线程 {thread_name} 检测到HTTP {search_resp.status_code}，尝试轮换会话...")
+                        if self._rotate_thread_session():
+                            retry_count += 1
+                            time.sleep(10)  # 等待10秒后重试
+                            continue
+                    
+                    retry_count += 1
+                    time.sleep(5)  # 等待5秒后重试
+                    
+            except Exception as e:
+                print(f"线程 {thread_name} 请求异常: {e}")
+                self.monitor.record_request(search_url, success=False, error_type=str(e))
+                retry_count += 1
+                time.sleep(5)  # 等待5秒后重试
+        
+        print(f"线程 {thread_name} 第{page_index}页请求失败，已达到最大重试次数")
+        return None
+    
+    def _crawl_single_category(self, category_info, keywords=None, start_date=None, end_date=None, 
+                              speed_mode="正常速度", disable_speed_limit=False, callback=None, stop_callback=None):
+        """爬取单个分类的方法（线程安全）"""
+        category_name, category_code = category_info
+        thread_name = threading.current_thread().name
+        
+        # 更新活跃线程数
+        with self.stats_lock:
+            self.stats['active_threads'] += 1
+        
+        try:
+            print(f"线程 {thread_name} 开始爬取分类: {category_name} (代码: {category_code})")
+            if callback:
+                callback(f"线程 {thread_name} 开始爬取分类: {category_name}")
+            
+            # 解析时间范围
+            dt_start = None
+            dt_end = None
+            enable_time_filter = False
+            
+            if start_date and end_date:
+                try:
+                    dt_start = datetime.strptime(start_date, '%Y-%m-%d')
+                    dt_end = datetime.strptime(end_date, '%Y-%m-%d')
+                    enable_time_filter = True
+                except ValueError:
+                    enable_time_filter = False
+            
+            # 设置速度模式
+            if speed_mode == "快速模式":
+                delay_range = (0.5, 1.5)
+            elif speed_mode == "慢速模式":
+                delay_range = (2, 4)
+            else:  # 正常速度
+                delay_range = (1, 2)
+            
+            # 爬取当前分类的所有页面
+            page_index = 1
+            max_pages = 999999
+            category_policies = []
+            empty_page_count = 0
+            max_empty_pages = 15
+            
+            while page_index <= max_pages and empty_page_count < max_empty_pages:
+                if stop_callback and stop_callback():
+                    print(f"线程 {thread_name} 用户已停止爬取")
+                    break
+                    
+                try:
+                    # 使用优化的搜索参数
+                    post_data = self._get_search_parameters(
+                        keywords=keywords,
+                        category_code=category_code,
+                        page_index=page_index,
+                        page_size=20,
+                        start_date=start_date,
+                        end_date=end_date,
+                        old_page_index=page_index - 1 if page_index > 1 else None
+                    )
+                    
+                    search_keyword = ' '.join(keywords) if keywords else ''
+                    print(f"线程 {thread_name} 搜索关键词: '{search_keyword}', 分类: {category_code}, 页码: {page_index}")
+                    
+                    # 使用线程安全的请求方法
+                    resp = self._request_page_with_check_thread(page_index, post_data, page_index - 1 if page_index > 1 else None)
+                    
+                    if not resp:
+                        print(f"线程 {thread_name} 第{page_index}页请求失败")
+                        break
+                    
+                    # 解析页面
+                    soup = BeautifulSoup(resp.content, 'html.parser')
+                    
+                    # 使用优化的解析方法
+                    page_policies = self._parse_policy_list_optimized(soup, callback, stop_callback, category_name)
+                    
+                    if len(page_policies) == 0:
+                        empty_page_count += 1
+                        print(f"线程 {thread_name} 分类[{category_name}] 第 {page_index} 页未获取到政策，连续空页: {empty_page_count}")
+                        if empty_page_count >= max_empty_pages:
+                            print(f"线程 {thread_name} 分类[{category_name}] 连续 {max_empty_pages} 页无数据，停止翻页")
+                            break
+                    else:
+                        empty_page_count = 0  # 重置空页计数
+                    
+                    # 更新总爬取数量
+                    with self.stats_lock:
+                        self.stats['total_crawled'] += len(page_policies)
+                    
+                    if callback:
+                        callback(f"线程 {thread_name} 分类[{category_name}] 第 {page_index} 页获取 {len(page_policies)} 条政策")
+                    
+                    # 过滤关键词、时间
+                    filtered_policies = []
+                    for policy in page_policies:
+                        # 关键词过滤
+                        if keywords and not self._is_policy_match_keywords(policy, keywords):
+                            continue
+                        
+                        # 时间过滤
+                        if enable_time_filter:
+                            if self._is_policy_in_date_range(policy, dt_start, dt_end):
+                                filtered_policies.append(policy)
+                                # 发送政策数据信号
+                                if callback:
+                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                        else:
+                            # 不启用时间过滤，直接包含所有政策
+                            filtered_policies.append(policy)
+                            # 发送政策数据信号
+                            if callback:
+                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                    
+                    # 更新过滤后数量
+                    with self.stats_lock:
+                        self.stats['total_filtered'] += len(filtered_policies)
+                    
+                    if callback:
+                        if enable_time_filter:
+                            callback(f"线程 {thread_name} 分类[{category_name}] 第 {page_index} 页过滤后保留 {len(filtered_policies)} 条政策")
+                        else:
+                            callback(f"线程 {thread_name} 分类[{category_name}] 第 {page_index} 页保留 {len(filtered_policies)} 条政策")
+                    
+                    category_policies.extend(filtered_policies)
+                    
+                    # 检查是否到达最大页数
+                    if page_index >= max_pages:
+                        print(f"线程 {thread_name} 分类[{category_name}] 已到达最大页数限制 ({max_pages} 页)，停止翻页")
+                        break
+                    
+                    page_index += 1
+                    
+                    # 添加延时
+                    if not disable_speed_limit:
+                        delay = random.uniform(*delay_range)
+                        time.sleep(delay)
+                        
+                except Exception as e:
+                    print(f"线程 {thread_name} 请求失败: {e}")
+                    import traceback
+                    print(f"线程 {thread_name} 详细错误信息: {traceback.format_exc()}")
+                    self.monitor.record_request(self.search_url, success=False, error_type=str(e))
+                    
+                    # 如果是网络相关错误，尝试重试
+                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
+                        print(f"线程 {thread_name} 检测到网络错误，等待5秒后重试...")
+                        if callback:
+                            callback(f"线程 {thread_name} 网络错误，等待重试...")
+                        time.sleep(5)
+                        continue
+                    
+                    # 如果是反爬虫相关错误，增加延时
+                    if "403" in str(e) or "429" in str(e) or "block" in str(e).lower():
+                        print(f"线程 {thread_name} 检测到反爬虫限制，等待10秒后重试...")
+                        if callback:
+                            callback(f"线程 {thread_name} 检测到访问限制，等待重试...")
+                        time.sleep(10)
+                        continue
+                    
+                    # 其他错误，记录并继续
+                    print(f"线程 {thread_name} 未知错误，跳过当前页面")
+                    if callback:
+                        callback(f"线程 {thread_name} 页面处理出错，跳过继续...")
+                    break
+            
+            # 显示当前分类的统计信息
+            print(f"线程 {thread_name} 分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
+            if callback:
+                callback(f"线程 {thread_name} 分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
+            
+            # 将结果放入队列
+            self.result_queue.put((category_name, category_policies))
+            
+            # 更新完成统计
+            with self.stats_lock:
+                self.stats['completed_categories'] += 1
+                self.stats['active_threads'] -= 1
+            
+            return category_policies
+            
+        except Exception as e:
+            print(f"线程 {thread_name} 爬取分类 {category_name} 时发生异常: {e}")
+            import traceback
+            print(f"线程 {thread_name} 详细错误信息: {traceback.format_exc()}")
+            
+            # 记录错误
+            self.error_queue.put((category_name, str(e)))
+            
+            # 更新失败统计
+            with self.stats_lock:
+                self.stats['failed_categories'] += 1
+                self.stats['active_threads'] -= 1
+            
+            return []
+    
+    def crawl_policies_multithread(self, keywords=None, callback=None, start_date=None, end_date=None, 
+                                  speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, max_workers=None):
+        """多线程政策爬取方法"""
+        if max_workers is None:
+            max_workers = self.max_workers
+        
+        print(f"开始多线程爬取广东省政策，线程数: {max_workers}")
+        print(f"关键词: {keywords}, 时间范围: {start_date} 至 {end_date}")
+        
+        # 重置统计信息
+        with self.stats_lock:
+            self.stats = {
+                'total_crawled': 0,
+                'total_filtered': 0,
+                'total_saved': 0,
+                'active_threads': 0,
+                'completed_categories': 0,
+                'failed_categories': 0
+            }
+        
+        # 获取所有分类
+        categories = self._get_flat_categories()
+        print(f"找到 {len(categories)} 个分类，将使用 {max_workers} 个线程并行爬取")
+        
+        if callback:
+            callback(f"开始多线程爬取，共 {len(categories)} 个分类，使用 {max_workers} 个线程")
+        
+        all_policies = []
+        start_time = time.time()
+        
+        # 使用线程池执行爬取任务
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有分类的爬取任务
+            future_to_category = {}
+            for category_info in categories:
+                if stop_callback and stop_callback():
+                    print("用户已停止爬取")
+                    break
+                
+                future = executor.submit(
+                    self._crawl_single_category,
+                    category_info,
+                    keywords,
+                    start_date,
+                    end_date,
+                    speed_mode,
+                    disable_speed_limit,
+                    callback,
+                    stop_callback
+                )
+                future_to_category[future] = category_info[0]  # category_name
+            
+            # 收集结果
+            for future in as_completed(future_to_category):
+                category_name = future_to_category[future]
+                try:
+                    category_policies = future.result()
+                    all_policies.extend(category_policies)
+                    
+                    # 实时显示进度
+                    with self.stats_lock:
+                        completed = self.stats['completed_categories']
+                        failed = self.stats['failed_categories']
+                        total = len(categories)
+                        active = self.stats['active_threads']
+                    
+                    if callback:
+                        callback(f"分类 {category_name} 完成，当前进度: {completed}/{total} 完成, {failed} 失败, {active} 活跃线程")
+                    
+                except Exception as e:
+                    print(f"分类 {category_name} 执行异常: {e}")
+                    if callback:
+                        callback(f"分类 {category_name} 执行失败: {e}")
+        
+        # 应用去重机制
+        print("应用数据去重...")
+        if callback:
+            callback("应用数据去重...")
+        
+        unique_policies = self._deduplicate_policies(all_policies)
+        
+        # 最终统计
+        with self.stats_lock:
+            self.stats['total_saved'] = len(unique_policies)
+        
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        
+        print(f"多线程爬取完成统计:")
+        print(f"  总耗时: {elapsed_time:.2f} 秒")
+        print(f"  总爬取数量: {self.stats['total_crawled']} 条")
+        print(f"  过滤后数量: {self.stats['total_filtered']} 条")
+        print(f"  最终保存数量: {self.stats['total_saved']} 条")
+        print(f"  完成分类数: {self.stats['completed_categories']} 个")
+        print(f"  失败分类数: {self.stats['failed_categories']} 个")
+        
+        if callback:
+            callback(f"多线程爬取完成！总耗时: {elapsed_time:.2f}秒，最终保存: {self.stats['total_saved']} 条")
+        
+        return unique_policies
+    
+    def get_multithread_stats(self):
+        """获取多线程爬取统计信息"""
+        with self.stats_lock:
+            return self.stats.copy()
+    
+    def get_error_summary(self):
+        """获取错误摘要"""
+        errors = []
+        while not self.error_queue.empty():
+            try:
+                category_name, error_msg = self.error_queue.get_nowait()
+                errors.append((category_name, error_msg))
+            except queue.Empty:
+                break
+        return errors
+
 class GuangdongPolicyCrawler(GuangdongSpider):
-    """广东省政策爬虫类（GuangdongSpider的别名）"""
-    pass
+    """广东省政策爬虫 - 兼容性包装类"""
+    
+    def __init__(self):
+        super().__init__()
+    
+    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
+                      speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
+        """兼容性方法，调用优化的爬取方法"""
+        return self.crawl_policies_optimized(
+            keywords=keywords,
+            callback=callback,
+            start_date=start_date,
+            end_date=end_date,
+            speed_mode=speed_mode,
+            disable_speed_limit=disable_speed_limit,
+            stop_callback=stop_callback
+        )
 
 if __name__ == "__main__":
     spider = GuangdongSpider()

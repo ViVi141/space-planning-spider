@@ -190,9 +190,6 @@ class DatabaseManagerDialog(QDialog):
             
             # 安全设置行数
             row_count = len(backup_files)
-            if row_count > 1000:  # 限制最大行数避免溢出
-                row_count = 1000
-                print(f"备份文件数量过多，限制显示前 {row_count} 个")
             
             self.backup_table.setRowCount(row_count)
             
