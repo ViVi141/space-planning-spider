@@ -18,13 +18,13 @@
     "headers_settings": {
       "randomize_user_agent": true,
       "add_referer": true,
-      "add_fingerprint": false
+      "add_fingerprint": true
     },
     "behavior_settings": {
       "simulate_human_behavior": true,
       "random_delay": true,
-      "mouse_movement": false,
-      "scroll_simulation": false
+      "mouse_movement": true,
+      "scroll_simulation": true
     },
     "proxy_settings": {
       "enabled": false,

@@ -11,6 +11,7 @@ import json
 import time
 import logging
 import threading
+import re
 from typing import Optional, Dict, List
 from datetime import datetime
 from kdl.auth import Auth
@@ -18,6 +19,47 @@ from kdl.client import Client
 import random # Added for random.random()
 
 logger = logging.getLogger(__name__)
+
+
+def is_valid_ip(ip: str) -> bool:
+    """验证IP地址格式是否正确"""
+    try:
+        # 检查IP格式
+        parts = ip.split('.')
+        if len(parts) != 4:
+            return False
+        
+        for part in parts:
+            if not part.isdigit():
+                return False
+            num = int(part)
+            if num < 0 or num > 255:
+                return False
+        
+        return True
+    except:
+        return False
+
+
+def is_valid_port(port: str) -> bool:
+    """验证端口格式是否正确"""
+    try:
+        port_num = int(port)
+        return 1 <= port_num <= 65535
+    except:
+        return False
+
+
+def is_valid_proxy_format(proxy_str: str) -> bool:
+    """验证代理格式是否正确 (ip:port)"""
+    try:
+        if ':' not in proxy_str:
+            return False
+        
+        ip, port = proxy_str.split(':', 1)
+        return is_valid_ip(ip) and is_valid_port(port)
+    except:
+        return False
 
 
 class ProxyInfo:
@@ -28,17 +70,32 @@ class ProxyInfo:
         if isinstance(proxy_data, str):
             # 隧道代理返回字符串格式：ip:port 或其他格式
             if ':' in proxy_data:
-                self.ip, self.port = proxy_data.split(':')
+                self.ip, self.port = proxy_data.split(':', 1)
+                # 验证IP和端口格式
+                if not is_valid_ip(self.ip):
+                    raise ValueError(f"无效的IP地址格式: {self.ip}")
+                if not is_valid_port(self.port):
+                    raise ValueError(f"无效的端口格式: {self.port}")
             else:
-                # 如果不是 ip:port 格式，可能是其他格式，直接使用
-                self.ip = proxy_data
-                self.port = '80'  # 使用默认端口
+                # 如果不是 ip:port 格式，检查是否为有效IP
+                if is_valid_ip(proxy_data):
+                    self.ip = proxy_data
+                    self.port = '80'  # 使用默认端口
+                else:
+                    raise ValueError(f"无效的代理数据格式: {proxy_data}")
         elif isinstance(proxy_data, dict):
             # API代理返回字典格式
             self.ip = proxy_data.get('ip')
             self.port = proxy_data.get('port')
+            
+            # 验证IP和端口
             if not self.ip or not self.port:
                 raise ValueError(f"代理数据缺少必要字段: {proxy_data}")
+            
+            if not is_valid_ip(self.ip):
+                raise ValueError(f"无效的IP地址格式: {self.ip}")
+            if not is_valid_port(self.port):
+                raise ValueError(f"无效的端口格式: {self.port}")
         else:
             raise ValueError(f"不支持的代理数据格式: {type(proxy_data)}")
         
@@ -101,11 +158,15 @@ class ProxyInfo:
         self.last_score = max(0, min(100, score))  # 限制在0-100之间
         return self.last_score
     
-    def mark_used(self, success: bool = True, response_time: float = None):
-        """标记代理使用情况"""
+    def mark_used(self, success: bool = True, response_time: float | None = None):
+        """标记代理使用情况
+        
+        Args:
+            success: 是否成功使用代理
+            response_time: 响应时间(秒)
+        """
         self.last_used_at = datetime.now()
         self.use_count += 1
-        
         if success:
             self.success_count += 1
             self.consecutive_failures = 0
@@ -307,18 +368,56 @@ class ProxyPool:
                 # 使用API代理
                 new_proxies_data = self.client.get_dps(num=self.max_proxies // 2)
             
+            logger.info(f"从代理API获取到 {len(new_proxies_data) if new_proxies_data else 0} 个代理数据")
             logger.debug(f"获取到的新代理数据: {new_proxies_data}")
             
+            # 确保new_proxies_data是列表格式
+            if isinstance(new_proxies_data, str):
+                # 如果API返回单个字符串，转换为列表
+                new_proxies_data = [new_proxies_data]
+            elif not isinstance(new_proxies_data, (list, tuple)):
+                # 如果不是列表或元组，转换为列表
+                new_proxies_data = [new_proxies_data] if new_proxies_data else []
+            
             new_proxies = []
-            for proxy_data in new_proxies_data:
+            invalid_count = 0
+            
+            for i, proxy_data in enumerate(new_proxies_data):
                 try:
-                    if isinstance(proxy_data, (dict, str)):
+                    logger.debug(f"正在解析第 {i+1} 个代理数据: {proxy_data} (类型: {type(proxy_data)})")
+                    
+                    if isinstance(proxy_data, str):
+                        # 处理多行字符串
+                        for line in proxy_data.splitlines():
+                            line = line.strip()
+                            if not line:
+                                continue
+                            if not is_valid_proxy_format(line):
+                                logger.warning(f"跳过无效代理格式: {line}")
+                                invalid_count += 1
+                                continue
+                            proxy = ProxyInfo(line)
+                            new_proxies.append(proxy)
+                            logger.debug(f"成功解析代理: {proxy.ip}:{proxy.port}")
+                        continue  # 跳过后续逻辑
+                    elif isinstance(proxy_data, dict):
+                        ip = proxy_data.get('ip')
+                        port = proxy_data.get('port')
+                        if not ip or not port or not is_valid_ip(ip) or not is_valid_port(port):
+                            logger.warning(f"跳过无效代理数据: {proxy_data}")
+                            invalid_count += 1
+                            continue
                         proxy = ProxyInfo(proxy_data)
                         new_proxies.append(proxy)
+                        logger.debug(f"成功解析代理: {proxy.ip}:{proxy.port}")
                     else:
                         logger.error(f"不支持的代理数据类型: {type(proxy_data)}, 数据: {proxy_data}")
+                        invalid_count += 1
                 except Exception as e:
                     logger.error(f"解析代理数据失败: {e}, 数据: {proxy_data}")
+                    invalid_count += 1
+            
+            logger.info(f"代理解析完成: 成功 {len(new_proxies)} 个, 无效 {invalid_count} 个")
             
             with self.lock:
                 # 保留现有的好代理
@@ -337,6 +436,8 @@ class ProxyPool:
             
         except Exception as e:
             logger.error(f"刷新代理失败: {e}")
+            import traceback
+            logger.error(f"详细错误信息: {traceback.format_exc()}")
     
     def get_proxy(self) -> Optional[ProxyInfo]:
         """获取一个可用代理（智能选择策略）"""
@@ -388,11 +489,10 @@ class ProxyPool:
             
             return None
     
-    def report_proxy_result(self, proxy: ProxyInfo, success: bool, response_time: float = None):
+    def report_proxy_result(self, proxy: ProxyInfo, success: bool, response_time: Optional[float] = None):
         """报告代理使用结果"""
         if proxy:
             proxy.mark_used(success, response_time)
-            
             # 如果代理评分过低或连续失败，触发刷新
             if proxy.last_score < 30 or proxy.consecutive_failures >= 3:
                 self._refresh_proxies()
@@ -442,7 +542,7 @@ class ProxyManager:
             self.proxy_pool = None
             self.initialized = True
     
-    def initialize(self, config_file: str = None):
+    def initialize(self, config_file: str):
         """初始化代理池"""
         if config_file and os.path.exists(config_file):
             try:
@@ -495,7 +595,7 @@ class ProxyManager:
 _proxy_manager = ProxyManager()
 
 
-def initialize_proxy_pool(config_file: str = None):
+def initialize_proxy_pool(config_file: str):
     """初始化全局代理池"""
     _proxy_manager.initialize(config_file)
 

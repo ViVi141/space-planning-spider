@@ -202,7 +202,9 @@ class CrawlerStatusDialog(QDialog):
     
     def setup_ui(self):
         """初始化UI"""
-        self.setWindowTitle(f"爬虫状态 - {self.crawler.name}")
+        # 安全获取爬虫名称
+        crawler_name = getattr(self.crawler, 'name', 'Unknown')
+        self.setWindowTitle(f"爬虫状态 - {crawler_name}")
         self.setMinimumWidth(400)
         
         layout = QVBoxLayout()
@@ -263,38 +265,119 @@ class CrawlerStatusDialog(QDialog):
             return
         
         try:
-            stats = self.crawler.get_crawling_stats()
-            session = self.crawler.get_session_info()
+            # 尝试获取爬虫统计信息
+            stats = self._get_crawler_stats()
+            session = self._get_session_info()
             
             # 更新代理状态
-            if stats['proxy_enabled']:
-                current_proxy = session.get('current_proxy')
-                proxy_stats = stats.get('proxy_stats', {})
-                proxy_details = proxy_stats.get('proxy_details', [])
-                
-                # 查找当前代理的详细信息
-                current_proxy_detail = None
-                if current_proxy and proxy_details:
-                    current_proxy_ip = current_proxy.split(':')[0]
-                    for detail in proxy_details:
-                        if detail['ip'] == current_proxy_ip:
-                            current_proxy_detail = detail
-                            break
-                
-                proxy_info = {
-                    'enabled': True,
-                    'current_proxy': current_proxy,
-                    'score': current_proxy_detail['score'] if current_proxy_detail else 0,
-                    'response_time': current_proxy_detail['avg_response_time'] if current_proxy_detail else None,
-                    'usage_count': session['proxy_usage_count'],
-                    'retry_count': session.get('retry_count', 0)
-                }
-            else:
-                proxy_info = None
-            
+            proxy_info = self._extract_proxy_info(stats, session)
             self.proxy_status.update_status(proxy_info)
             
             # 更新重试配置
+            self._update_retry_config(stats)
+            
+            # 更新进度和统计信息
+            self._update_progress_and_stats(stats)
+            
+        except Exception as e:
+            print(f"更新状态失败: {e}")
+            # 显示错误信息
+            self.total_label.setText(f"状态更新失败: {str(e)}")
+            self.success_label.setText("")
+            self.failed_label.setText("")
+            self.success_rate_label.setText("")
+    
+    def _get_crawler_stats(self):
+        """安全获取爬虫统计信息"""
+        try:
+            # 尝试不同的方法名
+            if hasattr(self.crawler, 'get_crawling_stats'):
+                return self.crawler.get_crawling_stats()
+            elif hasattr(self.crawler, 'get_stats'):
+                return self.crawler.get_stats()
+            else:
+                # 返回默认统计信息
+                return {
+                    'total_pages': 0,
+                    'successful_pages': 0,
+                    'failed_pages': 0,
+                    'proxy_enabled': False
+                }
+        except Exception as e:
+            print(f"获取爬虫统计失败: {e}")
+            return {
+                'total_pages': 0,
+                'successful_pages': 0,
+                'failed_pages': 0,
+                'proxy_enabled': False
+            }
+    
+    def _get_session_info(self):
+        """安全获取会话信息"""
+        try:
+            if hasattr(self.crawler, 'get_session_info'):
+                return self.crawler.get_session_info()
+            else:
+                return {}
+        except Exception as e:
+            print(f"获取会话信息失败: {e}")
+            return {}
+    
+    def _extract_proxy_info(self, stats, session):
+        """提取代理信息"""
+        try:
+            # 检查是否启用代理 - 支持多种状态格式
+            proxy_enabled = stats.get('proxy_enabled', False)
+            
+            # 如果stats中有proxy_status，使用它
+            if 'proxy_status' in stats:
+                proxy_status = stats['proxy_status']
+                proxy_enabled = proxy_status.get('enabled', False)
+                
+                if proxy_enabled and proxy_status.get('current_proxy'):
+                    current_proxy_info = proxy_status['current_proxy']
+                    return {
+                        'enabled': True,
+                        'current_proxy': f"{current_proxy_info['ip']}:{current_proxy_info['port']}",
+                        'score': current_proxy_info.get('success_rate', 0) * 100,  # 转换为百分比
+                        'response_time': None,  # 持久化代理管理器不提供响应时间
+                        'usage_count': current_proxy_info.get('use_count', 0),
+                        'retry_count': current_proxy_info.get('consecutive_failures', 0)
+                    }
+            
+            # 兼容旧格式
+            if not proxy_enabled:
+                return None
+            
+            # 获取当前代理信息
+            current_proxy = session.get('current_proxy')
+            proxy_stats = stats.get('proxy_stats', {})
+            proxy_details = proxy_stats.get('proxy_details', [])
+            
+            # 查找当前代理的详细信息
+            current_proxy_detail = None
+            if current_proxy and proxy_details:
+                current_proxy_ip = current_proxy.split(':')[0]
+                for detail in proxy_details:
+                    if detail.get('ip') == current_proxy_ip:
+                        current_proxy_detail = detail
+                        break
+            
+            return {
+                'enabled': True,
+                'current_proxy': current_proxy,
+                'score': current_proxy_detail.get('score', 0) if current_proxy_detail else 0,
+                'response_time': current_proxy_detail.get('avg_response_time') if current_proxy_detail else None,
+                'usage_count': session.get('proxy_usage_count', 0),
+                'retry_count': session.get('retry_count', 0)
+            }
+        except Exception as e:
+            print(f"提取代理信息失败: {e}")
+            return None
+    
+    def _update_retry_config(self, stats):
+        """更新重试配置显示"""
+        try:
             retry_stats = stats.get('retry_stats', {})
             self.max_retries_label.setText(f"最大重试次数: {retry_stats.get('max_retries', 3)}")
             self.retry_delay_label.setText(
@@ -303,31 +386,49 @@ class CrawlerStatusDialog(QDialog):
             )
             retry_codes = retry_stats.get('retry_codes', [])
             self.retry_codes_label.setText(f"重试状态码: {', '.join(map(str, retry_codes))}")
-            
-            # 更新进度和统计信息
-            total = stats['total_pages']
-            success = stats['successful_pages']
-            failed = stats['failed_pages']
+        except Exception as e:
+            print(f"更新重试配置失败: {e}")
+            self.max_retries_label.setText("最大重试次数: 未知")
+            self.retry_delay_label.setText("重试延迟: 未知")
+            self.retry_codes_label.setText("重试状态码: 未知")
+    
+    def _update_progress_and_stats(self, stats):
+        """更新进度和统计信息"""
+        try:
+            # 兼容不同的统计字段名
+            total = stats.get('total_pages', stats.get('total_requests', 0))
+            success = stats.get('successful_pages', stats.get('successful_requests', 0))
+            failed = stats.get('failed_pages', stats.get('failed_requests', 0))
             
             if total > 0:
                 success_rate = (success / total) * 100
                 self.progress_bar.setValue(int(success_rate))
+            else:
+                self.progress_bar.setValue(0)
             
             self.total_label.setText(f"总页面数: {total}")
             self.success_label.setText(f"成功页面: {success}")
             self.failed_label.setText(f"失败页面: {failed}")
             self.success_rate_label.setText(f"成功率: {success_rate:.1f}%" if total > 0 else "成功率: -")
-            
         except Exception as e:
-            print(f"更新状态失败: {e}")
+            print(f"更新进度和统计失败: {e}")
+            self.total_label.setText("总页面数: 未知")
+            self.success_label.setText("成功页面: 未知")
+            self.failed_label.setText("失败页面: 未知")
+            self.success_rate_label.setText("成功率: 未知")
     
     def stop_crawler(self):
         """停止爬虫"""
         if self.crawler:
-            self.crawler.stop_crawling()
+            try:
+                if hasattr(self.crawler, 'stop_crawling'):
+                    self.crawler.stop_crawling()
+            except Exception as e:
+                print(f"停止爬虫失败: {e}")
             self.close()
     
     def closeEvent(self, event):
         """关闭事件"""
-        self.timer.stop()
+        if hasattr(self, 'timer'):
+            self.timer.stop()
         super().closeEvent(event) 

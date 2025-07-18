@@ -55,7 +55,25 @@ class ProxyTestThread(QThread):
                     proxies = client.get_dps(num=1)
                     self.progress.emit(f"获取到API代理数据: {proxies}")
                 
-                if proxies and len(proxies) > 0:
+                # 确保proxies是列表或可迭代对象
+                if not proxies:
+                    self.test_result.emit(False, "无法获取代理，请检查配置是否正确")
+                    return
+                
+                # 如果proxies是字符串，说明API返回了单个代理字符串
+                if isinstance(proxies, str):
+                    proxy = proxies
+                    self.progress.emit(f"解析代理数据: {proxy} (类型: {type(proxy)})")
+                    
+                    if ':' in proxy:
+                        ip, port = proxy.split(':', 1)
+                        self.test_result.emit(True, f"代理测试成功！获取到代理: {ip}:{port}")
+                    else:
+                        self.test_result.emit(True, f"代理测试成功！获取到代理: {proxy}")
+                    return
+                
+                # 如果proxies是列表，取第一个元素
+                if isinstance(proxies, (list, tuple)) and len(proxies) > 0:
                     proxy = proxies[0]
                     self.progress.emit(f"解析代理数据: {proxy} (类型: {type(proxy)})")
                     
@@ -68,7 +86,7 @@ class ProxyTestThread(QThread):
                     elif isinstance(proxy, str):
                         # 隧道代理返回字符串格式
                         if ':' in proxy:
-                            ip, port = proxy.split(':')
+                            ip, port = proxy.split(':', 1)
                             self.test_result.emit(True, f"代理测试成功！获取到代理: {ip}:{port}")
                         else:
                             # 如果不是 ip:port 格式，直接显示

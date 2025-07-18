@@ -106,8 +106,12 @@ class ProxyBaseCrawler:
             proxy_dict = self.proxy_manager.get_proxy_dict()
             if proxy_dict:
                 self.current_proxy = self.proxy_manager.get_proxy()
-                self.logger.debug(f"使用代理: {self.current_proxy.ip}:{self.current_proxy.port}")
-                return proxy_dict
+                if self.current_proxy:
+                    self.logger.debug(f"使用代理: {self.current_proxy.ip}:{self.current_proxy.port}")
+                    return proxy_dict
+                else:
+                    self.logger.warning("无法获取代理")
+                    return None
             else:
                 self.logger.warning("无法获取代理")
                 return None
@@ -115,15 +119,15 @@ class ProxyBaseCrawler:
             self.logger.error(f"获取代理失败: {e}")
             return None
     
-    def report_proxy_success(self, response_time: float = None):
+    def report_proxy_success(self, response_time: float = 0.0):
         """报告代理使用成功"""
-        if self.current_proxy and self.enable_proxy:
+        if self.current_proxy and self.enable_proxy and self.proxy_manager and self.proxy_manager.proxy_pool:
             self.proxy_manager.proxy_pool.report_proxy_result(self.current_proxy, True, response_time)
             self.proxy_usage_count += 1
     
-    def report_proxy_failure(self, response_time: float = None):
+    def report_proxy_failure(self, response_time: float = 0.0):
         """报告代理使用失败"""
-        if self.current_proxy and self.enable_proxy:
+        if self.current_proxy and self.enable_proxy and self.proxy_manager and self.proxy_manager.proxy_pool:
             self.proxy_manager.proxy_pool.report_proxy_result(self.current_proxy, False, response_time)
     
     def get_page(self, url: str, headers: Optional[Dict] = None, use_proxy: bool = True, 
@@ -157,7 +161,7 @@ class ProxyBaseCrawler:
                     'response_time': response_time,
                     'retry_count': retry_count
                 }
-                self.logger.info(f"使用代理 {self.current_proxy.ip}:{self.current_proxy.port} "
+                self.logger.info(f"使用代理 {self.current_proxy.ip if self.current_proxy else 'None'}:{self.current_proxy.port if self.current_proxy else 'None'} "
                                f"访问: {url} (耗时: {response_time:.2f}s)")
                 
                 # 检查响应状态码
@@ -187,11 +191,10 @@ class ProxyBaseCrawler:
             response_time = time.time() - start_time
             if proxy_dict:
                 self.report_proxy_failure(response_time)
-                self.logger.error(f"代理 {self.current_proxy.ip}:{self.current_proxy.port} "
-                                f"访问失败: {url}, 错误: {e}, 耗时: {response_time:.2f}s")
+                proxy_info = f"代理 {self.current_proxy.ip if self.current_proxy else 'None'}:{self.current_proxy.port if self.current_proxy else 'None'}"
+                self.logger.error(f"{proxy_info} 访问失败: {url}, 错误: {e}, 耗时: {response_time:.2f}s")
             else:
                 self.logger.error(f"直接访问失败: {url}, 错误: {e}, 耗时: {response_time:.2f}s")
-            
             # 处理重试
             if retry_count < self.max_retries:
                 return self._handle_retry(url, headers, use_proxy, retry_count, e)

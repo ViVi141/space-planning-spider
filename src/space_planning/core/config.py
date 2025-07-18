@@ -7,7 +7,6 @@
 import os
 import sys
 import json
-from pathlib import Path
 
 # 应用配置
 APP_CONFIG = {

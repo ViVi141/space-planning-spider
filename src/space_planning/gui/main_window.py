@@ -6,8 +6,6 @@ import os
 import threading
 from datetime import datetime, timedelta
 import re
-import urllib3
-import warnings
 
 # 启用SSL安全验证
 # 移除SSL警告禁用，确保安全连接
@@ -652,7 +650,7 @@ class MainWindow(QMainWindow):
 
     def on_multithread_changed(self, state):
         """多线程选项变化事件"""
-        is_enabled = state == Qt.Checked
+        is_enabled = state == Qt.CheckState.Checked
         self.thread_count_combo.setEnabled(is_enabled)
         
         # 检查当前选择的机构是否支持多线程
@@ -742,7 +740,8 @@ class MainWindow(QMainWindow):
             
             # 获取多线程设置
             use_multithread = self.multithread_checkbox.isChecked()
-            thread_count = int(self.thread_count_combo.currentText())
+            thread_count_text = self.thread_count_combo.currentText()
+            thread_count = int(thread_count_text) if thread_count_text else 4
             
             # 创建并启动搜索线程
             self.current_data = [] # 清空当前数据
@@ -1684,12 +1683,27 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'crawler_status_dialog'):
             self.crawler_status_dialog.close()
         
-        if hasattr(self, 'search_thread') and self.search_thread.isRunning():
-            # 使用搜索线程中的爬虫
-            crawler = self.search_thread.spider
-        else:
-            # 使用默认爬虫
-            crawler = self.spider
+        # 安全获取当前爬虫实例
+        crawler = None
+        try:
+            if hasattr(self, 'search_thread') and self.search_thread.isRunning():
+                # 使用搜索线程中的爬虫
+                crawler = getattr(self.search_thread, 'spider', None)
+            
+            # 如果没有找到爬虫，使用默认爬虫
+            if crawler is None:
+                crawler = self.spider
+                
+            # 如果还是没有爬虫，创建一个默认的
+            if crawler is None:
+                from space_planning.spider.national import NationalSpider
+                crawler = NationalSpider()
+                
+        except Exception as e:
+            print(f"获取爬虫实例失败: {e}")
+            # 创建一个默认爬虫
+            from space_planning.spider.national import NationalSpider
+            crawler = NationalSpider()
         
         self.crawler_status_dialog = CrawlerStatusDialog(crawler, self)
         self.crawler_status_dialog.show()

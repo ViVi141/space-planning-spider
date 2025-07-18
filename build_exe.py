@@ -1,374 +1,295 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-空间规划政策合规性分析系统 - EXE打包脚本
-支持多种打包方式：单文件、目录、安装程序
+空间规划政策爬虫系统 - EXE打包脚本
 """
 
 import os
 import sys
 import shutil
 import subprocess
-import platform
-from datetime import datetime
+from pathlib import Path
 
-class ExeBuilder:
-    def __init__(self):
-        self.project_name = "空间规划政策合规性分析系统"
-        self.version = "v3.0.0"
-        self.main_file = "src/space_planning/main.py"
-        self.icon_file = "docs/icon.ico"
-        self.dist_dir = "dist"
-        self.build_dir = "build"
-        
-    def check_requirements(self):
-        """检查打包环境"""
-        print("🔍 检查打包环境...")
-        
-        # 检查PyInstaller
+def check_dependencies():
+    """检查依赖是否安装"""
+    try:
+        import PyInstaller
+        print("✅ PyInstaller已安装")
+    except ImportError:
+        print("❌ PyInstaller未安装，正在安装...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+        print("✅ PyInstaller安装完成")
+    
+    # 检查其他必要依赖
+    required_packages = [
+        "PyQt5", "requests", "beautifulsoup4", "python-docx", 
+        "fuzzywuzzy", "python-Levenshtein", "lxml", "pandas", 
+        "openpyxl", "kdl"
+    ]
+    
+    missing_packages = []
+    for package in required_packages:
         try:
-            import PyInstaller
-            print(f"✅ PyInstaller版本: {PyInstaller.__version__}")
+            __import__(package.replace("-", "_"))
+            print(f"✅ {package} 已安装")
         except ImportError:
-            print("❌ PyInstaller未安装，正在安装...")
-            subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"])
-        
-        # 检查主文件
-        if not os.path.exists(self.main_file):
-            print(f"❌ 主文件不存在: {self.main_file}")
-            return False
-        
-        # 检查图标文件
-        if not os.path.exists(self.icon_file):
-            print(f"⚠️  图标文件不存在: {self.icon_file}")
-            self.icon_file = None
-        
-        print("✅ 环境检查完成")
-        return True
+            missing_packages.append(package)
+            print(f"❌ {package} 未安装")
     
-    def clean_build_dirs(self):
-        """清理构建目录"""
-        print("🧹 清理构建目录...")
-        
-        for dir_path in [self.dist_dir, self.build_dir]:
-            if os.path.exists(dir_path):
-                shutil.rmtree(dir_path)
-                print(f"   已清理: {dir_path}")
-        
-        # 清理spec文件
-        spec_files = [f for f in os.listdir(".") if f.endswith(".spec")]
-        for spec_file in spec_files:
-            if spec_file != "空间规划政策爬虫系统.spec":  # 保留原始spec
-                os.remove(spec_file)
-                print(f"   已清理: {spec_file}")
+    if missing_packages:
+        print(f"\n正在安装缺失的包: {', '.join(missing_packages)}")
+        for package in missing_packages:
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                print(f"✅ {package} 安装完成")
+            except subprocess.CalledProcessError:
+                print(f"❌ {package} 安装失败")
+                return False
     
-    def build_single_file(self):
-        """构建单文件exe"""
-        print("\n📦 构建单文件exe...")
-        
-        cmd = [
-            "pyinstaller",
-            "--onefile",
-            "--windowed",
-            "--name", f"{self.project_name}_{self.version}",
-            "--distpath", self.dist_dir,
-            "--workpath", self.build_dir,
-            "--specpath", ".",
-            "--clean",
-            "--noconfirm"
-        ]
-        
-        if self.icon_file and os.path.exists(self.icon_file):
-            cmd.extend(["--icon", self.icon_file])
-        
-        # 添加数据文件
-        cmd.extend(["--add-data", "src/space_planning;space_planning"])
-        
-        # 添加隐藏导入
-        hidden_imports = [
-            "PyQt5.QtCore",
-            "PyQt5.QtGui", 
-            "PyQt5.QtWidgets",
-            "requests",
-            "bs4",
-            "sqlite3",
-            "threading",
-            "queue",
-            "concurrent.futures"
-        ]
-        
-        for imp in hidden_imports:
-            cmd.extend(["--hidden-import", imp])
-        
-        cmd.append(self.main_file)
-        
-        print(f"执行命令: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print("✅ 单文件exe构建成功")
-            return True
-        else:
-            print(f"❌ 构建失败: {result.stderr}")
-            return False
+    return True
+
+def create_spec_file():
+    """创建PyInstaller spec文件"""
+    spec_content = '''# -*- mode: python ; coding: utf-8 -*-
+
+import os
+import sys
+from pathlib import Path
+
+# 获取项目根目录
+project_root = Path.cwd()
+src_path = project_root / 'src'
+
+# 数据文件
+datas = [
+    (str(src_path / 'space_planning' / 'gui' / 'proxy_config.json'), 'space_planning/gui'),
+    (str(src_path / 'crawler_config.json'), 'space_planning'),
+    (str(project_root / 'docs' / 'icon.ico'), 'docs'),
+]
+
+# 隐藏导入
+hiddenimports = [
+    'PyQt5.QtCore',
+    'PyQt5.QtGui', 
+    'PyQt5.QtWidgets',
+    'requests',
+    'bs4',
+    'docx',
+    'fuzzywuzzy',
+    'Levenshtein',
+    'lxml',
+    'pandas',
+    'openpyxl',
+    'kdl',
+    'kdl.auth',
+    'kdl.client',
+    'space_planning.gui.main_window',
+    'space_planning.gui.crawler_settings_dialog',
+    'space_planning.gui.crawler_status_dialog',
+    'space_planning.gui.database_manager_dialog',
+    'space_planning.gui.rag_export_dialog',
+    'space_planning.spider.guangdong',
+    'space_planning.spider.national',
+    'space_planning.spider.mnr',
+    'space_planning.spider.enhanced_base_crawler',
+    'space_planning.spider.persistent_proxy_manager',
+    'space_planning.spider.smart_request_manager',
+    'space_planning.spider.advanced_anti_detection',
+    'space_planning.spider.javascript_fingerprint',
+    'space_planning.core.database',
+    'space_planning.core.config',
+    'space_planning.utils.export',
+    'space_planning.utils.rag_export',
+    'space_planning.utils.compliance',
+    'space_planning.utils.compare',
+    'space_planning.utils.migrate',
+]
+
+# 排除模块
+excludes = [
+    'matplotlib',
+    'numpy',
+    'scipy',
+    'PIL',
+    'cv2',
+    'tkinter',
+    'test',
+    'unittest',
+    'doctest',
+    'pdb',
+    'pydoc',
+    'pydoc_data',
+    'setuptools',
+    'distutils',
+    'email',
+    'html',
+    'http',
+    'urllib',
+    'xml',
+    'xmlrpc',
+    'pkg_resources',
+    'pkg_resources._vendor',
+    'pkg_resources.extern',
+    'pkg_resources._vendor.packaging',
+    'pkg_resources._vendor.pyparsing',
+    'pkg_resources._vendor.six',
+    'pkg_resources._vendor.requests',
+    'pkg_resources._vendor.urllib3',
+    'pkg_resources._vendor.chardet',
+    'pkg_resources._vendor.certifi',
+    'pkg_resources._vendor.idna',
+    'pkg_resources._vendor.requests.packages',
+    'pkg_resources._vendor.requests.packages.urllib3',
+    'pkg_resources._vendor.requests.packages.urllib3.util',
+    'pkg_resources._vendor.requests.packages.urllib3.contrib',
+    'pkg_resources._vendor.requests.packages.urllib3.packages',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.ssl_match_hostname',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.rfc3986',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.ordered_dict',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.makefile',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.ssl_match_hostname',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.ordered_dict',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.makefile',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.ssl_match_hostname',
+    'pkg_resources._vendor.requests.packages.urllib3.packages.backports.ordered_dict',
+]
+
+a = Analysis(
+    [str(src_path / 'space_planning' / 'main.py')],
+    pathex=[str(src_path)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=None,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=None)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    [],
+    name='空间规划政策爬虫系统',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=str(project_root / 'docs' / 'icon.ico'),
+)
+'''
     
-    def build_directory(self):
-        """构建目录模式exe"""
-        print("\n📁 构建目录模式exe...")
-        
-        cmd = [
-            "pyinstaller",
-            "--onedir",
-            "--windowed",
-            "--name", f"{self.project_name}_{self.version}_目录版",
-            "--distpath", self.dist_dir,
-            "--workpath", self.build_dir,
-            "--specpath", ".",
-            "--clean",
-            "--noconfirm"
-        ]
-        
-        if self.icon_file and os.path.exists(self.icon_file):
-            cmd.extend(["--icon", self.icon_file])
-        
-        # 添加数据文件
-        cmd.extend(["--add-data", "src/space_planning;space_planning"])
-        
-        # 添加隐藏导入
-        hidden_imports = [
-            "PyQt5.QtCore",
-            "PyQt5.QtGui", 
-            "PyQt5.QtWidgets",
-            "requests",
-            "bs4",
-            "sqlite3",
-            "threading",
-            "queue",
-            "concurrent.futures"
-        ]
-        
-        for imp in hidden_imports:
-            cmd.extend(["--hidden-import", imp])
-        
-        cmd.append(self.main_file)
-        
-        print(f"执行命令: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print("✅ 目录模式exe构建成功")
-            return True
-        else:
-            print(f"❌ 构建失败: {result.stderr}")
-            return False
+    with open('space_planning_spider.spec', 'w', encoding='utf-8') as f:
+        f.write(spec_content)
     
-    def build_with_spec(self):
-        """使用spec文件构建"""
-        print("\n🔧 使用spec文件构建...")
-        
-        if not os.path.exists("空间规划政策爬虫系统.spec"):
-            print("❌ spec文件不存在")
-            return False
-        
-        cmd = [
-            "pyinstaller",
-            "--clean",
-            "--noconfirm",
-            "空间规划政策爬虫系统.spec"
-        ]
-        
-        print(f"执行命令: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print("✅ spec文件构建成功")
-            return True
-        else:
-            print(f"❌ 构建失败: {result.stderr}")
-            return False
+    print("✅ 已创建 spec 文件")
+
+def build_exe():
+    """构建EXE文件"""
+    print("\n=== 开始构建EXE文件 ===")
     
-    def create_launcher_scripts(self):
-        """创建启动脚本"""
-        print("\n📝 创建启动脚本...")
-        
-        # 创建Windows批处理文件
-        launcher_content = f"""@echo off
-chcp 65001 >nul
-title {self.project_name} {self.version}
-echo.
-echo ========================================
-echo {self.project_name} {self.version}
-echo ========================================
-echo.
-echo 正在启动程序...
-echo.
-
-cd /d "%~dp0"
-"{self.project_name}_{self.version}.exe"
-
-echo.
-echo 程序已退出，按任意键关闭窗口...
-pause >nul
-"""
-        
-        launcher_file = f"启动_{self.project_name}_{self.version}.bat"
-        with open(launcher_file, "w", encoding="utf-8") as f:
-            f.write(launcher_content)
-        
-        print(f"✅ 已创建启动脚本: {launcher_file}")
+    # 检查依赖
+    if not check_dependencies():
+        print("❌ 依赖检查失败，无法继续构建")
+        return False
     
-    def create_readme(self):
-        """创建说明文档"""
-        print("\n📖 创建说明文档...")
-        
-        readme_content = f"""# {self.project_name} {self.version}
-
-## 系统要求
-- Windows 7/8/10/11 (64位)
-- 至少2GB可用内存
-- 至少500MB可用磁盘空间
-
-## 安装说明
-1. 解压所有文件到任意目录
-2. 双击"启动_{self.project_name}_{self.version}.bat"启动程序
-3. 或直接双击exe文件启动
-
-## 功能特性
-- 多源政策数据爬取（国家级、省级、部级）
-- 智能数据分析和合规性检查
-- 多线程爬取支持（广东省）
-- 数据导出（Word、Excel、文本、Markdown）
-- 实时监控和状态管理
-
-## 使用说明
-1. 选择政策来源机构
-2. 输入关键词或选择时间范围
-3. 点击"智能查询"开始爬取
-4. 查看结果并进行合规性分析
-5. 导出报告或保存数据
-
-## 注意事项
-- 首次运行可能需要较长时间初始化
-- 建议在非高峰期使用多线程功能
-- 如遇到问题，请查看日志文件
-
-## 技术支持
-如有问题，请联系技术支持团队。
-
----
-版本: {self.version}
-构建时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        
-        readme_file = f"README_{self.project_name}_{self.version}.txt"
-        with open(readme_file, "w", encoding="utf-8") as f:
-            f.write(readme_content)
-        
-        print(f"✅ 已创建说明文档: {readme_file}")
+    # 创建spec文件
+    create_spec_file()
     
-    def package_release(self):
-        """打包发布版本"""
-        print("\n📦 打包发布版本...")
-        
-        release_dir = f"{self.project_name}_{self.version}_发布版"
-        if os.path.exists(release_dir):
-            shutil.rmtree(release_dir)
-        
-        os.makedirs(release_dir)
-        
-        # 复制exe文件
-        exe_files = []
-        for file in os.listdir(self.dist_dir):
-            if file.endswith(".exe"):
-                src = os.path.join(self.dist_dir, file)
-                dst = os.path.join(release_dir, file)
-                shutil.copy2(src, dst)
-                exe_files.append(file)
-        
-        # 复制启动脚本
-        launcher_file = f"启动_{self.project_name}_{self.version}.bat"
-        if os.path.exists(launcher_file):
-            shutil.copy2(launcher_file, release_dir)
-        
-        # 复制说明文档
-        readme_file = f"README_{self.project_name}_{self.version}.txt"
-        if os.path.exists(readme_file):
-            shutil.copy2(readme_file, release_dir)
-        
-        # 复制使用说明
-        if os.path.exists("多线程爬虫使用说明.md"):
-            shutil.copy2("多线程爬虫使用说明.md", release_dir)
-        
-        print(f"✅ 发布版本已打包到: {release_dir}")
-        print(f"包含文件: {', '.join(exe_files)}")
+    # 清理之前的构建
+    if os.path.exists('build'):
+        shutil.rmtree('build')
+        print("✅ 已清理build目录")
     
-    def show_menu(self):
-        """显示菜单"""
-        print("\n" + "="*60)
-        print(f"🚀 {self.project_name} {self.version} - EXE打包工具")
-        print("="*60)
-        print("请选择打包方式:")
-        print("1. 构建单文件exe (推荐)")
-        print("2. 构建目录模式exe")
-        print("3. 使用spec文件构建")
-        print("4. 完整打包 (构建+启动脚本+说明文档)")
-        print("5. 清理构建文件")
-        print("0. 退出")
-        print("="*60)
-        
-        choice = input("请输入选择 (0-5): ").strip()
-        return choice
+    if os.path.exists('dist'):
+        shutil.rmtree('dist')
+        print("✅ 已清理dist目录")
     
-    def run(self):
-        """运行打包程序"""
-        print(f"欢迎使用{self.project_name}打包工具!")
+    # 构建EXE
+    try:
+        print("正在构建EXE文件，请稍候...")
+        subprocess.check_call([
+            sys.executable, "-m", "PyInstaller", 
+            "--clean", "--noconfirm", "space_planning_spider.spec"
+        ])
         
-        if not self.check_requirements():
-            print("❌ 环境检查失败，请检查依赖")
-            return
-        
-        while True:
-            choice = self.show_menu()
+        # 检查构建结果
+        exe_path = os.path.join('dist', '空间规划政策爬虫系统.exe')
+        if os.path.exists(exe_path):
+            file_size = os.path.getsize(exe_path) / (1024 * 1024)  # MB
+            print(f"✅ EXE构建成功!")
+            print(f"文件路径: {exe_path}")
+            print(f"文件大小: {file_size:.1f} MB")
             
-            if choice == "0":
-                print("👋 再见!")
-                break
-            elif choice == "1":
-                self.clean_build_dirs()
-                if self.build_single_file():
-                    print("✅ 单文件exe构建完成!")
-                else:
-                    print("❌ 构建失败!")
-            elif choice == "2":
-                self.clean_build_dirs()
-                if self.build_directory():
-                    print("✅ 目录模式exe构建完成!")
-                else:
-                    print("❌ 构建失败!")
-            elif choice == "3":
-                if self.build_with_spec():
-                    print("✅ spec文件构建完成!")
-                else:
-                    print("❌ 构建失败!")
-            elif choice == "4":
-                print("🔄 开始完整打包流程...")
-                self.clean_build_dirs()
-                
-                if self.build_single_file():
-                    self.create_launcher_scripts()
-                    self.create_readme()
-                    self.package_release()
-                    print("✅ 完整打包完成!")
-                else:
-                    print("❌ 构建失败!")
-            elif choice == "5":
-                self.clean_build_dirs()
-                print("✅ 清理完成!")
-            else:
-                print("❌ 无效选择，请重新输入")
+            # 复制必要文件到dist目录
+            dist_dir = 'dist'
+            if not os.path.exists(dist_dir):
+                os.makedirs(dist_dir)
             
-            input("\n按回车键继续...")
+            # 复制README和LICENSE
+            for file in ['README.md', 'LICENSE', 'CHANGELOG.md']:
+                if os.path.exists(file):
+                    shutil.copy2(file, dist_dir)
+                    print(f"✅ 已复制 {file}")
+            
+            # 复制启动脚本
+            if os.path.exists('启动程序.bat'):
+                shutil.copy2('启动程序.bat', dist_dir)
+                print("✅ 已复制启动脚本")
+            
+            print(f"\n🎉 构建完成! EXE文件位于: {exe_path}")
+            return True
+        else:
+            print("❌ EXE文件未生成")
+            return False
+            
+    except subprocess.CalledProcessError as e:
+        print(f"❌ 构建失败: {e}")
+        return False
+    except Exception as e:
+        print(f"❌ 构建过程中出错: {e}")
+        return False
+
+def main():
+    """主函数"""
+    print("=== 空间规划政策爬虫系统 - EXE打包工具 ===")
+    print("版本: v3.0.0")
+    print()
+    
+    # 检查当前目录
+    if not os.path.exists('src/space_planning/main.py'):
+        print("❌ 错误: 请在项目根目录运行此脚本")
+        return
+    
+    # 开始构建
+    if build_exe():
+        print("\n✅ 打包完成!")
+        print("\n使用说明:")
+        print("1. EXE文件位于 dist/ 目录")
+        print("2. 可以直接运行 空间规划政策爬虫系统.exe")
+        print("3. 首次运行可能需要几秒钟启动时间")
+        print("4. 如果遇到问题，请检查是否有杀毒软件拦截")
+    else:
+        print("\n❌ 打包失败!")
+        print("请检查错误信息并重试")
 
 if __name__ == "__main__":
-    builder = ExeBuilder()
-    builder.run() 
+    main() 

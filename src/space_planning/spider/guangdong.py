@@ -16,35 +16,30 @@ import re
 from datetime import datetime
 from bs4 import BeautifulSoup, Tag
 from urllib.parse import urljoin, urlparse
-import urllib3
 import hashlib
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import copy
 
 # 启用SSL安全验证
 # 移除SSL警告禁用，确保安全连接
 
-from .anti_crawler import AntiCrawlerManager
+from .enhanced_base_crawler import EnhancedBaseCrawler
 from .monitor import CrawlerMonitor
 from ..core import database as db
 
-class GuangdongSpider:
+class GuangdongSpider(EnhancedBaseCrawler):
     """广东省政策爬虫 - 使用真实API接口"""
     
     def __init__(self):
+        # 初始化基础爬虫
+        super().__init__("广东省政策爬虫", enable_proxy=True)
+        
         self.base_url = "https://gd.pkulaw.com"
         self.search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
         
-        # 初始化防反爬虫组件
-        self.anti_crawler = AntiCrawlerManager()
+        # 初始化监控组件
         self.monitor = CrawlerMonitor()
-        
-        # 创建会话
-        self.session = requests.Session()
-        # 启用SSL证书验证，确保安全连接
-        self.session.verify = True
         
         # 设置基础请求头
         self.headers = {
@@ -90,6 +85,22 @@ class GuangdongSpider:
         
         # 设置Cookie
         self.session.cookies.set('JSESSIONID', '1234567890ABCDEF', domain='gd.pkulaw.com')
+        
+        # ✅ 添加代理支持
+        if self.enable_proxy:
+            proxy_dict = self.proxy_manager.get_proxy()
+            if proxy_dict:
+                self.session.proxies.update(proxy_dict)
+                print(f"会话已设置代理: {proxy_dict}")
+                # 记录当前代理信息
+                proxy_status = self.proxy_manager.get_status()
+                if proxy_status.get('current_proxy'):
+                    current_proxy = proxy_status['current_proxy']
+                    print(f"当前代理: {current_proxy['ip']}:{current_proxy['port']}")
+            else:
+                print("警告: 启用代理但无法获取代理，将使用直接连接")
+        else:
+            print("代理已禁用，使用直接连接")
         
         # 访问首页获取必要的Cookie
         try:
@@ -160,12 +171,13 @@ class GuangdongSpider:
                 
                 print(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 try:
-                    check_resp = self.session.post(check_url, headers=check_headers, timeout=15)
-                    if check_resp.status_code == 200:
+                    # ✅ 使用代理进行校验请求
+                    check_resp, check_info = self.post_page(check_url, headers=check_headers)
+                    if check_resp and check_resp.status_code == 200:
                         self.monitor.record_request(check_url, success=True)
                     else:
-                        self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
-                    print(f"翻页校验响应状态码: {check_resp.status_code}")
+                        self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code if check_resp else 'No response'}")
+                    print(f"翻页校验响应状态码: {check_resp.status_code if check_resp else 'No response'}")
                 except Exception as check_error:
                     self.monitor.record_request(check_url, success=False, error_type=str(check_error))
                     print(f"翻页校验请求失败: {check_error}")
@@ -181,11 +193,13 @@ class GuangdongSpider:
                     search_params['OldPageIndex'] = str(old_page_index)
                 
                 print(f"请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
-                search_resp = self.session.post(search_url, data=search_params, headers=search_headers, timeout=30)
                 
-                print(f"数据接口响应状态码: {search_resp.status_code}")
+                # ✅ 使用代理进行数据请求
+                search_resp, search_info = self.post_page(search_url, data=search_params, headers=search_headers)
                 
-                if search_resp.status_code == 200:
+                print(f"数据接口响应状态码: {search_resp.status_code if search_resp else 'No response'}")
+                
+                if search_resp and search_resp.status_code == 200:
                     # 检查响应内容是否包含访问限制
                     response_text = search_resp.text
                     if self._handle_access_limit(response_text):
@@ -199,41 +213,41 @@ class GuangdongSpider:
                     print(f"第{page_index}页请求成功")
                     return search_resp
                 else:
-                    self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
-                    print(f"数据请求失败，状态码: {search_resp.status_code}")
+                    error_msg = f"HTTP {search_resp.status_code}" if search_resp else "请求失败"
+                    self.monitor.record_request(search_url, success=False, error_type=error_msg)
+                    print(f"数据请求失败，状态码: {error_msg}")
                     
                     # 如果是403或429错误，尝试轮换会话
-                    if search_resp.status_code in [403, 429]:
-                        print(f"检测到HTTP {search_resp.status_code}错误，尝试轮换会话...")
+                    if search_resp and search_resp.status_code in [403, 429]:
+                        print(f"检测到访问限制，尝试轮换会话...")
                         if self._rotate_session():
+                            print("会话轮换成功，重试请求")
                             retry_count += 1
                             import time
-                            time.sleep(10)  # 等待10秒后重试
+                            time.sleep(3)  # 等待3秒后重试
                             continue
+                        else:
+                            print("会话轮换失败")
                     
-                    return None
-                    
-            except Exception as e:
-                print(f"页面请求异常: {e}")
-                import traceback
-                print(f"详细错误信息: {traceback.format_exc()}")
-                
-                # 如果是网络相关错误，尝试轮换会话
-                if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                    print("检测到网络错误，尝试轮换会话...")
-                    if self._rotate_session():
-                        retry_count += 1
+                    # 如果是其他错误，增加重试次数
+                    retry_count += 1
+                    if retry_count < max_retries:
                         import time
-                        time.sleep(10)  # 等待10秒后重试
+                        time.sleep(2)  # 等待2秒后重试
                         continue
-                
+                    else:
+                        print(f"达到最大重试次数({max_retries})，放弃请求")
+                        return None
+                        
+            except Exception as e:
+                print(f"请求异常: {e}")
                 retry_count += 1
                 if retry_count < max_retries:
                     import time
-                    time.sleep(15)  # 等待15秒后重试
+                    time.sleep(2)  # 等待2秒后重试
                     continue
                 else:
-                    print(f"第{page_index}页请求失败，已达到最大重试次数")
+                    print(f"达到最大重试次数({max_retries})，放弃请求")
                     return None
         
         return None
@@ -554,24 +568,22 @@ class GuangdongSpider:
                     print(f"搜索关键词: '{search_keyword}', 分类: {category_code}, 页码: {page_index}")
                     
                     headers = self.headers.copy()
-                    headers.update(self.anti_crawler.get_random_headers())
                     
-                    resp = self.session.post(
+                    resp, request_info = self.post_page(
                         self.search_url,
                         data=post_data,
-                        headers=headers,
-                        timeout=30
+                        headers=headers
                     )
                     
-                    if resp.status_code == 200:
+                    if resp and resp.status_code == 200:
                         self.monitor.record_request(self.search_url, success=True)
+                        # 解析页面
+                        soup = BeautifulSoup(resp.content, 'html.parser')
                     else:
-                        self.monitor.record_request(self.search_url, success=False, error_type=f"HTTP {resp.status_code}")
-                        print(f"请求失败，状态码: {resp.status_code}")
+                        error_msg = f"HTTP {resp.status_code}" if resp else "请求失败"
+                        self.monitor.record_request(self.search_url, success=False, error_type=error_msg)
+                        print(f"请求失败: {error_msg}")
                         break
-                    
-                    # 解析页面
-                    soup = BeautifulSoup(resp.content, 'html.parser')
                     
                     # 解析政策列表
                     page_policies = self._parse_policy_list_record_search(soup, callback, stop_callback, category_name)
@@ -1234,11 +1246,14 @@ class GuangdongSpider:
     def get_policy_detail(self, url):
         """获取政策详情内容"""
         try:
-            # 使用防反爬虫管理器发送请求
+            # 使用增强基础爬虫发送请求
             headers = self.headers.copy()
-            headers.update(self.anti_crawler.get_random_headers())
             
-            resp = self.anti_crawler.make_request(url, headers=headers)
+            resp, request_info = self.get_page(url, headers=headers)
+            
+            if not resp:
+                self.monitor.record_request(url, success=False, error_type="请求失败")
+                return ""
             
             # 记录成功的详情页面请求
             self.monitor.record_request(url, success=True)
@@ -1301,10 +1316,16 @@ class GuangdongSpider:
     
     def get_crawler_status(self):
         """获取爬虫状态"""
-        return {
+        # 获取父类的统计信息
+        base_stats = self.get_crawling_stats()
+        
+        # 添加广东省爬虫特有的状态信息
+        base_stats.update({
             'speed_mode': self.speed_mode,
             'monitor_stats': self.monitor.get_stats(),
-        }
+        })
+        
+        return base_stats
     
     def save_to_db(self, policies):
         """保存政策到数据库"""
@@ -1633,6 +1654,22 @@ class GuangdongSpider:
         all_policies = []
         
         # 遍历所有分类进行爬取
+        print("开始尝试多种搜索策略...")
+        if callback:
+            callback("开始尝试多种搜索策略...")
+        
+        strategy_policies = self._try_different_search_strategies(keywords, callback, stop_callback)
+        if strategy_policies:
+            all_policies.extend(strategy_policies)
+            print(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
+            if callback:
+                callback(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
+        
+        # 然后遍历所有分类进行传统爬取
+        print("开始传统分类爬取...")
+        if callback:
+            callback("开始传统分类爬取...")
+        
         for category_name, category_code in categories:
             if stop_callback and stop_callback():
                 print("用户已停止爬取")
@@ -1646,8 +1683,8 @@ class GuangdongSpider:
             page_index = 1
             max_pages = 999999  # 最大页数限制（无上限）
             category_policies = []
-            empty_page_count = 0
-            max_empty_pages = 15  # 增加连续空页容忍度（进一步增加）
+            empty_page_count = 0  # 连续空页计数
+            max_empty_pages = 10   # 最大连续空页数（增加容忍度）
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -1655,32 +1692,39 @@ class GuangdongSpider:
                     break
                     
                 try:
-                    # 使用优化的搜索参数
+                    # 使用基于网站分析的搜索参数
                     post_data = self._get_search_parameters(
                         keywords=keywords,
                         category_code=category_code,
                         page_index=page_index,
                         page_size=20,
                         start_date=start_date,
-                        end_date=end_date,
-                        old_page_index=page_index - 1 if page_index > 1 else None
+                        end_date=end_date
                     )
                     
                     search_keyword = ' '.join(keywords) if keywords else ''
                     print(f"搜索关键词: '{search_keyword}', 分类: {category_code}, 页码: {page_index}")
                     
-                    # 使用带翻页校验的请求方法
-                    resp = self._request_page_with_check(page_index, post_data, page_index - 1 if page_index > 1 else None)
+                    headers = self.headers.copy()
                     
-                    if not resp:
-                        print(f"第{page_index}页请求失败")
+                    resp, request_info = self.post_page(
+                        self.search_url,
+                        data=post_data,
+                        headers=headers
+                    )
+                    
+                    if resp and resp.status_code == 200:
+                        self.monitor.record_request(self.search_url, success=True)
+                        # 解析页面
+                        soup = BeautifulSoup(resp.content, 'html.parser')
+                    else:
+                        error_msg = f"HTTP {resp.status_code}" if resp else "请求失败"
+                        self.monitor.record_request(self.search_url, success=False, error_type=error_msg)
+                        print(f"请求失败: {error_msg}")
                         break
                     
-                    # 解析页面
-                    soup = BeautifulSoup(resp.content, 'html.parser')
-                    
-                    # 使用优化的解析方法
-                    page_policies = self._parse_policy_list_optimized(soup, callback, stop_callback, category_name)
+                    # 解析政策列表
+                    page_policies = self._parse_policy_list_record_search(soup, callback, stop_callback, category_name)
                     
                     if len(page_policies) == 0:
                         empty_page_count += 1
@@ -1708,15 +1752,15 @@ class GuangdongSpider:
                         if enable_time_filter:
                             if self._is_policy_in_date_range(policy, dt_start, dt_end):
                                 filtered_policies.append(policy)
-                                # 发送政策数据信号
+                                # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content
                                 if callback:
-                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
                         else:
                             # 不启用时间过滤，直接包含所有政策
                             filtered_policies.append(policy)
-                            # 发送政策数据信号
+                            # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content
                             if callback:
-                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}|{policy.get('category', '')}")
+                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
                     
                     # 更新过滤后数量
                     total_filtered += len(filtered_policies)
@@ -1744,30 +1788,7 @@ class GuangdongSpider:
                         
                 except Exception as e:
                     print(f"请求失败: {e}")
-                    import traceback
-                    print(f"详细错误信息: {traceback.format_exc()}")
                     self.monitor.record_request(self.search_url, success=False, error_type=str(e))
-                    
-                    # 如果是网络相关错误，尝试重试
-                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                        print(f"检测到网络错误，等待5秒后重试...")
-                        if callback:
-                            callback(f"网络错误，等待重试...")
-                        time.sleep(5)
-                        continue
-                    
-                    # 如果是反爬虫相关错误，增加延时
-                    if "403" in str(e) or "429" in str(e) or "block" in str(e).lower():
-                        print(f"检测到反爬虫限制，等待10秒后重试...")
-                        if callback:
-                            callback(f"检测到访问限制，等待重试...")
-                        time.sleep(10)
-                        continue
-                    
-                    # 其他错误，记录并继续
-                    print(f"未知错误，跳过当前页面")
-                    if callback:
-                        callback(f"页面处理出错，跳过继续...")
                     break
             
             # 显示当前分类的统计信息
@@ -1787,12 +1808,22 @@ class GuangdongSpider:
         
         print(f"爬取完成统计:")
         print(f"  总爬取数量: {total_crawled} 条")
-        print(f"  过滤后数量: {total_filtered} 条")
-        print(f"  最终保存数量: {total_saved} 条")
-        print(f"  去重减少: {total_filtered - total_saved} 条")
+        if keywords:
+            print(f"  关键词过滤: {keywords}")
+        if enable_time_filter:
+            print(f"  时间过滤: {start_date} 至 {end_date}")
+            print(f"  过滤后数量: {total_filtered} 条")
+        print(f"  去重后数量: {total_saved} 条")
         
         if callback:
-            callback(f"爬取完成！总爬取: {total_crawled} 条，过滤后: {total_filtered} 条，最终保存: {total_saved} 条")
+            callback(f"爬取完成统计:")
+            callback(f"  总爬取数量: {total_crawled} 条")
+            if keywords:
+                callback(f"  关键词过滤: {keywords}")
+            if enable_time_filter:
+                callback(f"  时间过滤: {start_date} 至 {end_date}")
+                callback(f"  过滤后数量: {total_filtered} 条") 
+            callback(f"  去重后数量: {total_saved} 条")
         
         return unique_policies
     
@@ -2214,12 +2245,17 @@ class GuangdongSpider:
         return unique_policies
 
 class GuangdongMultiThreadSpider(GuangdongSpider):
-    """广东省政策多线程爬虫 - 支持并行爬取多个分类"""
+    """广东省多线程爬虫"""
     
     def __init__(self, max_workers=4):
         super().__init__()
         self.max_workers = max_workers
-        self.thread_local = threading.local()
+        
+        # ✅ 添加线程会话管理
+        self.thread_sessions = {}
+        self.thread_locks = {}
+        
+        # 添加多线程统计管理
         self.result_queue = queue.Queue()
         self.error_queue = queue.Queue()
         self.stats_lock = threading.Lock()
@@ -2231,88 +2267,110 @@ class GuangdongMultiThreadSpider(GuangdongSpider):
             'completed_categories': 0,
             'failed_categories': 0
         }
+        
+        # 导入必要的模块
+        import string
+        self.string = string
+        
+        print(f"初始化多线程爬虫，最大线程数: {max_workers}")
     
     def _get_thread_session(self):
-        """为每个线程获取独立的会话"""
-        if not hasattr(self.thread_local, 'session'):
+        """获取线程专用会话"""
+        thread_id = threading.current_thread().ident
+        
+        if thread_id not in self.thread_sessions:
             # 创建新的会话
             session = requests.Session()
             session.headers.update(self.headers)
             
-            # 生成唯一的JSESSIONID
-            import random
-            import string
-            jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
-            session.cookies.set('JSESSIONID', jsessionid, domain='gd.pkulaw.com')
+            # 生成新的JSESSIONID
+            new_jsessionid = ''.join(random.choices(self.string.ascii_uppercase + self.string.digits, k=16))
+            session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
             
-            # 访问首页获取必要的Cookie
-            try:
-                resp = session.get(self.base_url, timeout=10)
-                if resp.status_code == 200:
-                    print(f"线程 {threading.current_thread().name} 成功初始化会话")
+            # ✅ 为每个线程会话设置代理
+            if self.enable_proxy:
+                proxy_dict = self.proxy_manager.get_proxy()
+                if proxy_dict:
+                    session.proxies.update(proxy_dict)
+                    print(f"线程 {thread_id} 会话已设置代理: {proxy_dict}")
+                    # 记录当前代理信息
+                    proxy_status = self.proxy_manager.get_status()
+                    if proxy_status.get('current_proxy'):
+                        current_proxy = proxy_status['current_proxy']
+                        print(f"线程 {thread_id} 当前代理: {current_proxy['ip']}:{current_proxy['port']}")
                 else:
-                    print(f"线程 {threading.current_thread().name} 初始化会话失败，状态码: {resp.status_code}")
-            except Exception as e:
-                print(f"线程 {threading.current_thread().name} 初始化会话异常: {e}")
+                    print(f"线程 {thread_id} 警告: 启用代理但无法获取代理，将使用直接连接")
+            else:
+                print(f"线程 {thread_id} 代理已禁用，使用直接连接")
             
-            self.thread_local.session = session
+            self.thread_sessions[thread_id] = session
+            self.thread_locks[thread_id] = threading.Lock()
         
-        return self.thread_local.session
+        return self.thread_sessions[thread_id], self.thread_locks[thread_id]
     
     def _rotate_thread_session(self):
-        """轮换线程会话"""
-        thread_name = threading.current_thread().name
-        print(f"线程 {thread_name} 轮换会话...")
+        """轮换线程会话，避免访问限制"""
+        thread_id = threading.current_thread().ident
+        print(f"线程 {thread_id} 轮换会话，避免访问限制...")
         
         # 创建新的会话
         new_session = requests.Session()
         new_session.headers.update(self.headers)
         
         # 生成新的JSESSIONID
-        import random
-        import string
-        new_jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        new_jsessionid = ''.join(random.choices(self.string.ascii_uppercase + self.string.digits, k=16))
         new_session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
+        
+        # ✅ 为新会话设置代理
+        if self.enable_proxy:
+            proxy_dict = self.proxy_manager.get_proxy()
+            if proxy_dict:
+                new_session.proxies.update(proxy_dict)
+                print(f"线程 {thread_id} 新会话已设置代理: {proxy_dict}")
         
         # 访问首页获取新的Cookie
         try:
             resp = new_session.get(self.base_url, timeout=10)
             if resp.status_code == 200:
-                print(f"线程 {thread_name} 成功轮换会话")
-                self.thread_local.session = new_session
+                print(f"线程 {thread_id} 成功轮换会话")
+                self.thread_sessions[thread_id] = new_session
                 return True
             else:
-                print(f"线程 {thread_name} 轮换会话失败，状态码: {resp.status_code}")
+                print(f"线程 {thread_id} 轮换会话失败，状态码: {resp.status_code}")
                 return False
         except Exception as e:
-            print(f"线程 {thread_name} 轮换会话异常: {e}")
+            print(f"线程 {thread_id} 轮换会话异常: {e}")
             return False
     
     def _request_page_with_check_thread(self, page_index, search_params, old_page_index=None):
-        """线程安全的页面请求方法"""
-        session = self._get_thread_session()
-        thread_name = threading.current_thread().name
+        """线程版本的带翻页校验的页面请求"""
         max_retries = 3
         retry_count = 0
         
         while retry_count < max_retries:
             try:
+                # 获取线程专用会话
+                session, lock = self._get_thread_session()
+                
                 # 1. 先请求翻页校验接口
                 check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
                 check_headers = self.headers.copy()
                 check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                 
-                print(f"线程 {thread_name} 请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                print(f"线程请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 try:
-                    check_resp = session.post(check_url, headers=check_headers, timeout=15)
+                    # ✅ 使用线程会话进行校验请求
+                    with lock:
+                        check_resp = session.post(check_url, headers=check_headers, timeout=15)
                     if check_resp.status_code == 200:
                         self.monitor.record_request(check_url, success=True)
                     else:
                         self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code}")
-                    print(f"线程 {thread_name} 翻页校验响应状态码: {check_resp.status_code}")
+                    print(f"翻页校验响应状态码: {check_resp.status_code}")
                 except Exception as check_error:
                     self.monitor.record_request(check_url, success=False, error_type=str(check_error))
-                    print(f"线程 {thread_name} 翻页校验请求失败: {check_error}")
+                    print(f"翻页校验请求失败: {check_error}")
+                    # 翻页校验失败不影响主请求，继续执行
                 
                 # 2. 再请求数据接口
                 search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
@@ -2323,56 +2381,66 @@ class GuangdongMultiThreadSpider(GuangdongSpider):
                 if old_page_index is not None:
                     search_params['OldPageIndex'] = str(old_page_index)
                 
-                print(f"线程 {thread_name} 请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
-                search_resp = session.post(search_url, data=search_params, headers=search_headers, timeout=30)
+                print(f"线程请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 
-                print(f"线程 {thread_name} 数据接口响应状态码: {search_resp.status_code}")
+                # ✅ 使用线程会话进行数据请求
+                with lock:
+                    search_resp = session.post(search_url, data=search_params, headers=search_headers, timeout=30)
+                
+                print(f"数据接口响应状态码: {search_resp.status_code}")
                 
                 if search_resp.status_code == 200:
                     # 检查响应内容是否包含访问限制
                     response_text = search_resp.text
-                    if "您已超过全文最大访问数" in response_text or "访问限制" in response_text:
-                        print(f"线程 {thread_name} 检测到访问限制，尝试轮换会话...")
+                    if self._handle_access_limit(response_text):
+                        print(f"检测到访问限制，已轮换会话，重试第{page_index}页")
                         if self._rotate_thread_session():
-                            print(f"线程 {thread_name} 会话轮换成功，继续爬取")
                             retry_count += 1
+                            import time
                             time.sleep(5)  # 等待5秒后重试
                             continue
-                        else:
-                            print(f"线程 {thread_name} 会话轮换失败，等待后重试...")
-                            time.sleep(30)  # 等待30秒
-                            if self._rotate_thread_session():
-                                retry_count += 1
-                                continue
-                            else:
-                                print(f"线程 {thread_name} 会话轮换彻底失败")
-                                return None
                     
                     self.monitor.record_request(search_url, success=True)
-                    print(f"线程 {thread_name} 第{page_index}页请求成功")
+                    print(f"第{page_index}页请求成功")
                     return search_resp
                 else:
-                    self.monitor.record_request(search_url, success=False, error_type=f"HTTP {search_resp.status_code}")
-                    print(f"线程 {thread_name} 数据请求失败，状态码: {search_resp.status_code}")
+                    error_msg = f"HTTP {search_resp.status_code}"
+                    self.monitor.record_request(search_url, success=False, error_type=error_msg)
+                    print(f"数据请求失败，状态码: {error_msg}")
                     
                     # 如果是403或429错误，尝试轮换会话
                     if search_resp.status_code in [403, 429]:
-                        print(f"线程 {thread_name} 检测到HTTP {search_resp.status_code}，尝试轮换会话...")
+                        print(f"检测到访问限制，尝试轮换会话...")
                         if self._rotate_thread_session():
+                            print("会话轮换成功，重试请求")
                             retry_count += 1
-                            time.sleep(10)  # 等待10秒后重试
+                            import time
+                            time.sleep(3)  # 等待3秒后重试
                             continue
+                        else:
+                            print("会话轮换失败")
                     
+                    # 如果是其他错误，增加重试次数
                     retry_count += 1
-                    time.sleep(5)  # 等待5秒后重试
-                    
+                    if retry_count < max_retries:
+                        import time
+                        time.sleep(2)  # 等待2秒后重试
+                        continue
+                    else:
+                        print(f"达到最大重试次数({max_retries})，放弃请求")
+                        return None
+                        
             except Exception as e:
-                print(f"线程 {thread_name} 请求异常: {e}")
-                self.monitor.record_request(search_url, success=False, error_type=str(e))
+                print(f"线程请求异常: {e}")
                 retry_count += 1
-                time.sleep(5)  # 等待5秒后重试
+                if retry_count < max_retries:
+                    import time
+                    time.sleep(2)  # 等待2秒后重试
+                    continue
+                else:
+                    print(f"达到最大重试次数({max_retries})，放弃请求")
+                    return None
         
-        print(f"线程 {thread_name} 第{page_index}页请求失败，已达到最大重试次数")
         return None
     
     def _crawl_single_category(self, category_info, keywords=None, start_date=None, end_date=None, 

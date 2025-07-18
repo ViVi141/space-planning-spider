@@ -9,6 +9,7 @@ import time
 import random
 import threading
 import requests
+import logging
 from typing import Dict, Optional, Any, Tuple, List
 from datetime import datetime
 from urllib.parse import urlparse
@@ -82,6 +83,9 @@ class SmartRequestManager:
     """智能请求管理器"""
     
     def __init__(self):
+        # 初始化logger
+        self.logger = logging.getLogger("SmartRequestManager")
+        
         # 初始化组件
         self.anti_detection = AdvancedAntiDetection()
         self.js_fingerprint = JavaScriptFingerprint()
@@ -141,6 +145,13 @@ class SmartRequestManager:
             headers['X-Client-Data'] = self.js_fingerprint.encode_fingerprint(fingerprint)
         
         return headers
+    
+    def get_headers(self, url: Optional[str] = None) -> Dict[str, str]:
+        """获取请求头"""
+        if url and crawler_config.is_enhanced_mode():
+            return self._get_enhanced_headers(url)
+        else:
+            return self._get_basic_headers()
     
     def _simulate_behavior(self) -> None:
         """模拟人类行为"""
@@ -331,7 +342,13 @@ class SmartRequestManager:
     
     def get_request_stats(self) -> Dict:
         """获取请求统计信息"""
-        stats = super().get_request_stats()
+        stats = {
+            'total_requests': self.total_requests,
+            'successful_requests': self.successful_requests,
+            'failed_requests': self.failed_requests,
+            'success_rate': round(self.successful_requests / self.total_requests * 100, 2) if self.total_requests > 0 else 0,
+            'mode': crawler_config.get_mode().value
+        }
         # 添加重试统计
         stats['retry_stats'] = self.retry_strategy.stats
         return stats
