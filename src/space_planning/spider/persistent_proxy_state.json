@@ -1,0 +1,19 @@
+{
+  "current_proxy": {
+    "ip": "58.19.54.137",
+    "port": "13506",
+    "proxy_type": "api",
+    "username": "",
+    "password": "",
+    "created_at": "2025-07-21T16:19:57.541947",
+    "first_used_at": null,
+    "last_used_at": null,
+    "last_success_at": null,
+    "use_count": 0,
+    "success_count": 0,
+    "failure_count": 0,
+    "consecutive_failures": 0,
+    "is_active": true
+  },
+  "last_update": "2025-07-21T16:19:57.541980"
+}

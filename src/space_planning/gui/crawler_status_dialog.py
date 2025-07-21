@@ -213,6 +213,16 @@ class CrawlerStatusDialog(QDialog):
         self.proxy_status = ProxyStatusWidget()
         layout.addWidget(self.proxy_status)
         
+        # 添加爬虫基本信息
+        info_group = QGroupBox("爬虫信息")
+        info_layout = QVBoxLayout()
+        self.level_label = QLabel("爬虫级别: 未知")
+        self.mode_label = QLabel("速度模式: 未知")
+        info_layout.addWidget(self.level_label)
+        info_layout.addWidget(self.mode_label)
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+        
         # 添加重试配置显示
         retry_group = QGroupBox("重试配置")
         retry_layout = QVBoxLayout()
@@ -224,6 +234,20 @@ class CrawlerStatusDialog(QDialog):
         retry_layout.addWidget(self.retry_codes_label)
         retry_group.setLayout(retry_layout)
         layout.addWidget(retry_group)
+        
+        # 添加多线程信息显示
+        multithread_group = QGroupBox("多线程信息")
+        multithread_layout = QVBoxLayout()
+        self.multithread_label = QLabel("活跃线程: 0")
+        self.crawled_label = QLabel("已爬取: 0")
+        self.saved_label = QLabel("已保存: 0")
+        self.elapsed_label = QLabel("耗时: 0.0秒")
+        multithread_layout.addWidget(self.multithread_label)
+        multithread_layout.addWidget(self.crawled_label)
+        multithread_layout.addWidget(self.saved_label)
+        multithread_layout.addWidget(self.elapsed_label)
+        multithread_group.setLayout(multithread_layout)
+        layout.addWidget(multithread_group)
         
         # 添加进度显示
         progress_layout = QHBoxLayout()
@@ -290,8 +314,42 @@ class CrawlerStatusDialog(QDialog):
     def _get_crawler_stats(self):
         """安全获取爬虫统计信息"""
         try:
+            # 首先尝试获取多线程爬虫的状态
+            if hasattr(self.crawler, 'get_crawler_status'):
+                status = self.crawler.get_crawler_status()
+                
+                # 如果是多线程爬虫，提取统计信息
+                if 'multithread_stats' in status:
+                    multithread_stats = status['multithread_stats']
+                    proxy_stats = status.get('proxy_stats', {})
+                    
+                    # 转换为标准格式
+                    return {
+                        'total_pages': multithread_stats.get('total_tasks', 0),
+                        'successful_pages': multithread_stats.get('completed_tasks', 0),
+                        'failed_pages': multithread_stats.get('failed_tasks', 0),
+                        'proxy_enabled': status.get('enable_proxy', False),
+                        'proxy_status': {
+                            'enabled': status.get('enable_proxy', False),
+                            'current_proxy': proxy_stats.get('current_proxy'),
+                            'proxy_details': proxy_stats.get('proxy_details', [])
+                        },
+                        'multithread_info': {
+                            'active_threads': multithread_stats.get('active_threads', 0),
+                            'total_crawled': multithread_stats.get('total_crawled', 0),
+                            'total_saved': multithread_stats.get('total_saved', 0),
+                            'elapsed_time': multithread_stats.get('elapsed_time', 0)
+                        },
+                        'level': status.get('level', '未知'),
+                        'speed_mode': status.get('speed_mode', '正常速度'),
+                        'categories': status.get('categories', [])
+                    }
+                else:
+                    # 普通爬虫状态
+                    return status
+            
             # 尝试不同的方法名
-            if hasattr(self.crawler, 'get_crawling_stats'):
+            elif hasattr(self.crawler, 'get_crawling_stats'):
                 return self.crawler.get_crawling_stats()
             elif hasattr(self.crawler, 'get_stats'):
                 return self.crawler.get_stats()
@@ -326,10 +384,7 @@ class CrawlerStatusDialog(QDialog):
     def _extract_proxy_info(self, stats, session):
         """提取代理信息"""
         try:
-            # 检查是否启用代理 - 支持多种状态格式
-            proxy_enabled = stats.get('proxy_enabled', False)
-            
-            # 如果stats中有proxy_status，使用它
+            # 首先检查stats中是否有proxy_status
             if 'proxy_status' in stats:
                 proxy_status = stats['proxy_status']
                 proxy_enabled = proxy_status.get('enabled', False)
@@ -344,8 +399,23 @@ class CrawlerStatusDialog(QDialog):
                         'usage_count': current_proxy_info.get('use_count', 0),
                         'retry_count': current_proxy_info.get('consecutive_failures', 0)
                     }
+                elif proxy_enabled:
+                    # 代理已启用但没有当前代理
+                    return {
+                        'enabled': True,
+                        'current_proxy': "等待获取",
+                        'score': 0,
+                        'response_time': None,
+                        'usage_count': 0,
+                        'retry_count': 0
+                    }
+                else:
+                    # 代理未启用
+                    return None
             
-            # 兼容旧格式
+            # 兼容旧格式 - 检查proxy_enabled字段
+            proxy_enabled = stats.get('proxy_enabled', False)
+            
             if not proxy_enabled:
                 return None
             
@@ -365,7 +435,7 @@ class CrawlerStatusDialog(QDialog):
             
             return {
                 'enabled': True,
-                'current_proxy': current_proxy,
+                'current_proxy': current_proxy or "等待获取",
                 'score': current_proxy_detail.get('score', 0) if current_proxy_detail else 0,
                 'response_time': current_proxy_detail.get('avg_response_time') if current_proxy_detail else None,
                 'usage_count': session.get('proxy_usage_count', 0),
@@ -395,27 +465,63 @@ class CrawlerStatusDialog(QDialog):
     def _update_progress_and_stats(self, stats):
         """更新进度和统计信息"""
         try:
-            # 兼容不同的统计字段名
-            total = stats.get('total_pages', stats.get('total_requests', 0))
-            success = stats.get('successful_pages', stats.get('successful_requests', 0))
-            failed = stats.get('failed_pages', stats.get('failed_requests', 0))
+            # 获取基础统计信息
+            total = stats.get('total_pages', 0)
+            successful = stats.get('successful_pages', 0)
+            failed = stats.get('failed_pages', 0)
             
+            # 计算成功率
             if total > 0:
-                success_rate = (success / total) * 100
-                self.progress_bar.setValue(int(success_rate))
+                success_rate = (successful / total) * 100
+            else:
+                success_rate = 0
+            
+            # 更新基础统计显示
+            self.total_label.setText(f"总任务数: {total}")
+            self.success_label.setText(f"成功任务数: {successful}")
+            self.failed_label.setText(f"失败任务数: {failed}")
+            self.success_rate_label.setText(f"成功率: {success_rate:.1f}%")
+            
+            # 更新进度条
+            if total > 0:
+                progress = (successful + failed) / total * 100
+                self.progress_bar.setValue(int(progress))
             else:
                 self.progress_bar.setValue(0)
             
-            self.total_label.setText(f"总页面数: {total}")
-            self.success_label.setText(f"成功页面: {success}")
-            self.failed_label.setText(f"失败页面: {failed}")
-            self.success_rate_label.setText(f"成功率: {success_rate:.1f}%" if total > 0 else "成功率: -")
+            # 显示多线程特定信息
+            if 'multithread_info' in stats:
+                multithread_info = stats['multithread_info']
+                active_threads = multithread_info.get('active_threads', 0)
+                total_crawled = multithread_info.get('total_crawled', 0)
+                total_saved = multithread_info.get('total_saved', 0)
+                elapsed_time = multithread_info.get('elapsed_time', 0)
+                
+                # 更新多线程信息显示
+                if hasattr(self, 'multithread_label'):
+                    self.multithread_label.setText(f"活跃线程: {active_threads}")
+                if hasattr(self, 'crawled_label'):
+                    self.crawled_label.setText(f"已爬取: {total_crawled}")
+                if hasattr(self, 'saved_label'):
+                    self.saved_label.setText(f"已保存: {total_saved}")
+                if hasattr(self, 'elapsed_label'):
+                    self.elapsed_label.setText(f"耗时: {elapsed_time:.1f}秒")
+            
+            # 显示爬虫级别和模式信息
+            if 'level' in stats:
+                level = stats['level']
+                speed_mode = stats.get('speed_mode', '正常速度')
+                if hasattr(self, 'level_label'):
+                    self.level_label.setText(f"爬虫级别: {level}")
+                if hasattr(self, 'mode_label'):
+                    self.mode_label.setText(f"速度模式: {speed_mode}")
+            
         except Exception as e:
-            print(f"更新进度和统计失败: {e}")
-            self.total_label.setText("总页面数: 未知")
-            self.success_label.setText("成功页面: 未知")
-            self.failed_label.setText("失败页面: 未知")
-            self.success_rate_label.setText("成功率: 未知")
+            print(f"更新进度和统计信息失败: {e}")
+            self.total_label.setText("统计信息更新失败")
+            self.success_label.setText("")
+            self.failed_label.setText("")
+            self.success_rate_label.setText("")
     
     def stop_crawler(self):
         """停止爬虫"""

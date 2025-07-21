@@ -16,7 +16,7 @@ from datetime import datetime
 from kdl.auth import Auth
 from kdl.client import Client
 
-from space_planning.spider.proxy_pool import ProxyPool, initialize_proxy_pool, get_proxy_stats
+from space_planning.spider.proxy_pool import ProxyPool, get_proxy_stats
 
 
 class ProxyTestThread(QThread):
@@ -107,43 +107,55 @@ class ProxySettingsDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("快代理设置")
+        self.setWindowTitle("代理设置")
         self.setModal(True)
         self.resize(600, 500)
         
-        # 加载配置
-        self.config_file = os.path.join(
-            os.path.dirname(__file__), 'proxy_config.json'
-        )
+        # 代理配置文件路径
+        self.config_file = os.path.join(os.path.dirname(__file__), 'proxy_config.json')
+        
+        # 初始化代理配置
         self.proxy_config = self.load_config()
         
+        # 初始化代理系统（仅在用户进入代理设置时）
+        self._initialize_proxy_system()
+        
+        # 创建UI
         self.init_ui()
+        
+        # 加载配置到UI
+        self._load_config_to_ui()
     
     def load_config(self):
         """加载代理配置"""
-        default_config = {
-            'enabled': False,
-            'secret_id': '',  # 快代理订单号
-            'secret_key': '', # 快代理密钥
-            'username': '',   # 代理隧道用户名（可选）
-            'password': '',   # 代理隧道密码（可选）
-            'max_proxies': 5,
-            'check_interval': 1800  # 30分钟，减少刷新频率
-        }
-        
-        if os.path.exists(self.config_file):
-            try:
+        try:
+            if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    # 合并配置，保留默认值
-                    for key, value in default_config.items():
-                        if key not in config:
-                            config[key] = value
                     return config
-            except Exception as e:
-                print(f"加载代理配置失败: {e}")
-        
-        return default_config
+            else:
+                # 返回默认配置
+                return {
+                    'enabled': False,
+                    'secret_id': '',
+                    'secret_key': '',
+                    'username': '',
+                    'password': '',
+                    'max_proxies': 5,
+                    'check_interval': 300
+                }
+        except Exception as e:
+            print(f"加载代理配置失败: {e}")
+            # 返回默认配置
+            return {
+                'enabled': False,
+                'secret_id': '',
+                'secret_key': '',
+                'username': '',
+                'password': '',
+                'max_proxies': 5,
+                'check_interval': 300
+            }
     
     def save_config(self):
         """保存代理配置"""
@@ -363,34 +375,71 @@ class ProxySettingsDialog(QDialog):
     
     def refresh_stats(self):
         """刷新统计信息"""
-        stats = get_proxy_stats()
-        
-        # 格式化统计信息
-        stats_text = f"""代理池状态:
-- 运行状态: {'运行中' if stats['running'] else '已停止'}
-- 当前代理数量: {stats['total_proxies']}
-- 检查间隔: {stats['check_interval']}秒
-- 最后刷新时间: {stats['last_refresh']}
+        try:
+            stats = get_proxy_stats()
+            
+            # 安全获取统计信息
+            pool_size = stats.get('pool_size', 0)
+            available_proxies = stats.get('available_proxies', 0)
+            total_requests = stats.get('total_requests', 0)
+            successful_requests = stats.get('successful_requests', 0)
+            failed_requests = stats.get('failed_requests', 0)
+            success_rate = stats.get('success_rate', 0.0)
+            initialization_time = stats.get('initialization_time', '未初始化')
+            
+            # 计算成功率
+            if total_requests > 0:
+                success_rate_percent = (successful_requests / total_requests) * 100
+            else:
+                success_rate_percent = 0.0
+            
+            # 格式化统计信息
+            stats_text = f"""代理池状态:
+- 运行状态: {'运行中' if pool_size > 0 else '已停止'}
+- 当前代理数量: {pool_size}
+- 可用代理数量: {available_proxies}
+- 总请求数: {total_requests}
+- 成功请求数: {successful_requests}
+- 失败请求数: {failed_requests}
+- 成功率: {success_rate_percent:.2f}%
+- 初始化时间: {initialization_time}
 """
-        
-        self.stats_text.setText(stats_text)
+            
+            self.stats_text.setText(stats_text)
+        except Exception as e:
+            self.stats_text.setText(f"获取统计信息失败: {str(e)}\n\n请稍后重试或检查代理池状态。")
     
     def save_settings(self):
         """保存设置"""
         config = self.get_config()
         
-        # 验证必填字段
-        if not config['secret_id'] or not config['secret_key']:
+        # 验证必填字段（只有在启用代理时才需要）
+        if config['enabled'] and (not config['secret_id'] or not config['secret_key']):
             QMessageBox.warning(self, "配置错误", "订单号和密钥为必填项")
             return
         
         # 保存配置
         self.proxy_config = config
         if self.save_config():
-            # 初始化代理池
-            initialize_proxy_pool(self.config_file)
-            QMessageBox.information(self, "保存成功", "代理设置已保存并生效")
-            self.accept()
+            try:
+                # 设置全局代理状态
+                from space_planning.spider.proxy_pool import set_global_proxy_enabled
+                set_global_proxy_enabled(config['enabled'])
+                
+                if config['enabled']:
+                    # 初始化代理池
+                    from space_planning.spider.proxy_pool import _proxy_manager
+                    if _proxy_manager.initialize(self.config_file):
+                        QMessageBox.information(self, "保存成功", "代理设置已保存并生效")
+                        self.accept()
+                    else:
+                        QMessageBox.warning(self, "初始化失败", "代理池初始化失败，请检查配置")
+                else:
+                    # 禁用代理
+                    QMessageBox.information(self, "保存成功", "代理已禁用")
+                    self.accept()
+            except Exception as e:
+                QMessageBox.warning(self, "初始化失败", f"代理设置保存失败: {str(e)}")
     
     def get_config(self):
         """获取当前配置"""
@@ -403,3 +452,44 @@ class ProxySettingsDialog(QDialog):
             'max_proxies': self.max_proxies_spin.value(),
             'check_interval': self.check_interval_spin.value()
         } 
+
+    def _initialize_proxy_system(self):
+        """初始化代理系统"""
+        try:
+            # 初始化代理池
+            from space_planning.spider.proxy_pool import initialize_proxy_pool, set_global_proxy_enabled
+            
+            if os.path.exists(self.config_file):
+                print("正在初始化代理池...")
+                initialize_proxy_pool(self.config_file)
+                print("代理池初始化完成")
+                
+                # 根据配置设置代理状态
+                if self.proxy_config.get('enabled', False):
+                    set_global_proxy_enabled(True)
+                    print("代理已启用")
+                else:
+                    set_global_proxy_enabled(False)
+                    print("代理已禁用")
+            else:
+                print("代理配置文件不存在，将禁用代理功能")
+                set_global_proxy_enabled(False)
+                
+        except Exception as e:
+            print(f"代理系统初始化失败: {e}")
+            # 确保代理被禁用
+            try:
+                from space_planning.spider.proxy_pool import set_global_proxy_enabled
+                set_global_proxy_enabled(False)
+            except:
+                pass
+
+    def _load_config_to_ui(self):
+        """从配置加载数据到UI"""
+        self.enable_proxy.setChecked(self.proxy_config.get('enabled', False))
+        self.secret_id_edit.setText(self.proxy_config.get('secret_id', ''))
+        self.secret_key_edit.setText(self.proxy_config.get('secret_key', ''))
+        self.username_edit.setText(self.proxy_config.get('username', ''))
+        self.password_edit.setText(self.proxy_config.get('password', ''))
+        self.max_proxies_spin.setValue(self.proxy_config.get('max_proxies', 5))
+        self.check_interval_spin.setValue(self.proxy_config.get('check_interval', 300)) 

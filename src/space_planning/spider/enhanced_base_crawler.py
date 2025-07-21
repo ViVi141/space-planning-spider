@@ -155,8 +155,29 @@ class EnhancedBaseCrawler:
         if not self.enable_proxy:
             return None
         
-        proxy_dict = self.proxy_manager.get_proxy()
-        if proxy_dict:
+        proxy_info = self.proxy_manager.get_proxy()
+        if proxy_info:
+            # 检查proxy_info的类型
+            if hasattr(proxy_info, 'ip') and hasattr(proxy_info, 'port'):
+                # 这是ProxyInfo对象
+                proxy_dict = {
+                    'http': f'http://{proxy_info.ip}:{proxy_info.port}',
+                    'https': f'http://{proxy_info.ip}:{proxy_info.port}'
+                }
+            elif isinstance(proxy_info, dict):
+                # 这是字典格式
+                if 'ip' in proxy_info and 'port' in proxy_info:
+                    proxy_dict = {
+                        'http': f'http://{proxy_info["ip"]}:{proxy_info["port"]}',
+                        'https': f'http://{proxy_info["ip"]}:{proxy_info["port"]}'
+                    }
+                else:
+                    self.logger.warning(f"代理信息格式错误: {proxy_info}")
+                    return None
+            else:
+                self.logger.warning(f"不支持的代理信息类型: {type(proxy_info)}")
+                return None
+            
             # 更新当前代理信息
             proxy_status = self.proxy_manager.get_status()
             self.current_proxy_info = proxy_status.get('current_proxy')
@@ -168,8 +189,10 @@ class EnhancedBaseCrawler:
                     self.proxy_switches += 1
                     self._last_proxy_ip = current_ip
                     self.logger.info(f"切换到代理: {current_ip}:{self.current_proxy_info['port']}")
+            
+            return proxy_dict
         
-        return proxy_dict
+        return None
     
     def _make_request(self, url: str, method: str = 'GET', headers: Optional[Dict] = None, 
                      data: Optional[Dict] = None, timeout: int = 30) -> Tuple[Optional[requests.Response], Dict]:
@@ -214,15 +237,26 @@ class EnhancedBaseCrawler:
                     self.successful_requests += 1
                     
                     # 报告代理使用成功
-                    if proxy_dict:
-                        self.proxy_manager.report_result(True, request_info['response_time'])
+                    if proxy_dict and hasattr(self, 'current_proxy_info'):
+                        proxy_info = self.proxy_manager.get_proxy()  # 重新获取代理信息
+                        if proxy_info:
+                            self.proxy_manager.report_result(proxy_info, True, request_info['response_time'])
                     
                     self.logger.debug(f"请求成功: {url} (耗时: {request_info['response_time']:.2f}s)")
                     return response, request_info
                 
                 elif response.status_code in [403, 429, 500, 502, 503, 504]:
                     # 这些状态码可能需要重试
-                    raise requests.exceptions.HTTPError(f"HTTP {response.status_code}")
+                    error_msg = f"HTTP {response.status_code}"
+                    if response.status_code == 500:
+                        error_msg += " (服务器内部错误)"
+                    elif response.status_code == 403:
+                        error_msg += " (访问被拒绝)"
+                    elif response.status_code == 429:
+                        error_msg += " (请求过于频繁)"
+                    
+                    self.logger.warning(f"请求返回错误状态码: {url} - {error_msg}")
+                    raise requests.exceptions.HTTPError(error_msg)
                 
                 else:
                     # 其他状态码直接返回
@@ -235,7 +269,9 @@ class EnhancedBaseCrawler:
                 
                 # 报告代理使用失败
                 if proxy_dict:
-                    self.proxy_manager.report_result(False, time.time() - start_time)
+                    proxy_info = self.proxy_manager.get_proxy()  # 重新获取代理信息
+                    if proxy_info:
+                        self.proxy_manager.report_result(proxy_info, False, time.time() - start_time)
                 
                 # 如果不是最后一次尝试，等待后重试
                 if attempt < self.max_retries:
@@ -274,12 +310,16 @@ class EnhancedBaseCrawler:
         
         # 输出当前代理状态
         proxy_status = self.proxy_manager.get_status()
+        self.logger.info(f"代理状态: {proxy_status}")
+        
         if proxy_status['enabled'] and proxy_status['current_proxy']:
             proxy_info = proxy_status['current_proxy']
             self.logger.info(f"当前代理: {proxy_info['ip']}:{proxy_info['port']} "
                            f"(使用次数: {proxy_info['use_count']}, 成功率: {proxy_info['success_rate']:.2%})")
+        elif proxy_status['enabled']:
+            self.logger.info("代理已启用但无可用代理，正在获取...")
         else:
-            self.logger.info("未启用代理或无可用代理")
+            self.logger.info("代理已禁用，使用直接连接")
     
     def stop_crawling(self) -> None:
         """停止爬取"""

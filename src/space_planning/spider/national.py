@@ -4,6 +4,7 @@ import time
 import random
 import sys
 import os
+from typing import Dict, Optional
 
 # 添加路径以便导入模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,6 +22,9 @@ LEVEL_NAME = "住房和城乡建设部"
 class NationalSpider:
     def __init__(self):
         self.api_url = "https://www.mohurd.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit"
+        
+        # 设置级别
+        self.level = "住房和城乡建设部"
         
         # 初始化防反爬虫管理器
         self.anti_crawler = AntiCrawlerManager()
@@ -286,6 +290,33 @@ class NationalSpider:
             'monitor_stats': self.monitor.get_stats(),
             # Removed rate_limiter_stats as per edit hint
         }
+
+    def _parse_policy_item(self, item: Dict) -> Optional[Dict]:
+        """解析单个政策项（与多线程版本保持一致）"""
+        try:
+            title = item.get('title', '').strip()
+            if not title:
+                return None
+            
+            pub_date = item.get('pub_date', '')
+            doc_number = item.get('doc_number', '')
+            url = item.get('source', '')
+            
+            # 获取政策详情内容
+            content = self.get_policy_detail(url) if url else ''
+            
+            return {
+                'level': self.level,
+                'title': title,
+                'pub_date': pub_date,
+                'doc_number': doc_number,
+                'source': url,
+                'content': content,
+                'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+        except Exception as e:
+            print(f"解析政策项失败: {e}")
+            return None
 
     def get_policy_detail(self, url, stop_callback=None):
         """获取政策详情内容"""

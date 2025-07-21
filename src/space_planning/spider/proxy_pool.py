@@ -225,8 +225,18 @@ class ProxyPool:
         self.check_interval = check_interval
         
         # 初始化快代理客户端
-        auth = Auth(self.secret_id, self.secret_key)
-        self.client = Client(auth)
+        try:
+            if not secret_id or not secret_key:
+                logger.warning("代理配置缺少订单号或密钥，将禁用代理功能")
+                self.client = None
+            else:
+                auth = Auth(self.secret_id, self.secret_key)
+                self.client = Client(auth)
+                logger.info("代理客户端初始化成功")
+        except Exception as e:
+            logger.error(f"代理客户端初始化失败: {e}")
+            logger.error(f"请检查订单号: {secret_id[:8]}... 和密钥配置是否正确")
+            self.client = None
         
         self.proxies: List[ProxyInfo] = []
         self.lock = threading.Lock()
@@ -241,6 +251,11 @@ class ProxyPool:
         
         # 本地代理缓存文件
         self.cache_file = os.path.join(os.path.dirname(__file__), 'proxy_cache.json')
+        
+        # 添加刷新时间控制
+        self._last_refresh_time = 0
+        self._refresh_failure_count = 0
+        self._max_refresh_failures = 3
     
     def start(self):
         """启动代理池"""
@@ -356,20 +371,60 @@ class ProxyPool:
                     logger.info(f"当前代理池状态良好，跳过刷新。好代理数量: {len(good_proxies)}")
                     return
             
-            # 获取新代理
-            if self.use_tunnel:
-                # 使用隧道代理
-                new_proxies_data = self.client.get_tps(
-                    num=self.max_proxies // 2,  # 只获取一半数量的新代理
-                    username=self.username,
-                    password=self.password
-                )
-            else:
-                # 使用API代理
-                new_proxies_data = self.client.get_dps(num=self.max_proxies // 2)
+            # 检查上次刷新时间，避免过于频繁的请求
+            current_time = time.time()
+            if hasattr(self, '_last_refresh_time') and current_time - self._last_refresh_time < 300:  # 5分钟内不重复刷新
+                logger.info("距离上次刷新时间过短，跳过刷新")
+                return
             
-            logger.info(f"从代理API获取到 {len(new_proxies_data) if new_proxies_data else 0} 个代理数据")
-            logger.debug(f"获取到的新代理数据: {new_proxies_data}")
+            # 获取新代理
+            try:
+                if not self.client:
+                    logger.error("代理客户端未初始化，无法获取代理")
+                    logger.error("请检查代理配置中的订单号和密钥是否正确")
+                    return
+                
+                if self.use_tunnel:
+                    # 使用隧道代理
+                    logger.info("正在获取隧道代理...")
+                    new_proxies_data = self.client.get_tps(
+                        num=self.max_proxies // 2,  # 只获取一半数量的新代理
+                        username=self.username,
+                        password=self.password
+                    )
+                else:
+                    # 使用API代理
+                    logger.info("正在获取API代理...")
+                    new_proxies_data = self.client.get_dps(num=self.max_proxies // 2)
+                
+                # 记录刷新时间
+                self._last_refresh_time = current_time
+                
+                logger.info(f"从代理API获取到 {len(new_proxies_data) if new_proxies_data else 0} 个代理数据")
+                logger.debug(f"获取到的新代理数据: {new_proxies_data}")
+                
+            except Exception as api_error:
+                # 处理API错误
+                error_msg = str(api_error)
+                logger.error(f"代理API请求失败: {api_error}")
+                logger.error(f"错误类型: {type(api_error).__name__}")
+                
+                if "req over limit" in error_msg or "503" in error_msg:
+                    logger.warning("代理API请求频率限制，等待后重试...")
+                    # 增加等待时间
+                    if hasattr(self, '_last_refresh_time'):
+                        self._last_refresh_time = current_time - 240  # 强制等待4分钟
+                    time.sleep(60)  # 等待1分钟
+                    return
+                elif "401" in error_msg or "403" in error_msg:
+                    logger.error("代理API认证失败，请检查订单号和密钥配置")
+                    return
+                elif "timeout" in error_msg.lower():
+                    logger.error("代理API请求超时，请检查网络连接")
+                    return
+                else:
+                    logger.error(f"代理API请求失败: {api_error}")
+                    return
             
             # 确保new_proxies_data是列表格式
             if isinstance(new_proxies_data, str):
@@ -504,25 +559,63 @@ class ProxyPool:
     
     def get_proxy_stats(self) -> Dict:
         """获取代理统计信息"""
-        with self.lock:
-            active_proxies = [p for p in self.proxies if not p.is_overused]
+        try:
+            with self.lock:
+                active_proxies = [p for p in self.proxies if not p.is_overused]
+                proxy_details = []
+                
+                for p in self.proxies:
+                    try:
+                        # 安全计算平均响应时间
+                        avg_response_time = None
+                        if p.response_times and len(p.response_times) > 0:
+                            avg_response_time = sum(p.response_times) / len(p.response_times)
+                        
+                        # 安全格式化最后使用时间
+                        last_used = None
+                        if p.last_used_at:
+                            try:
+                                last_used = p.last_used_at.strftime('%Y-%m-%d %H:%M:%S')
+                            except:
+                                last_used = '未知'
+                        
+                        proxy_details.append({
+                            'ip': p.ip,
+                            'port': p.port,
+                            'age_seconds': p.age_seconds,
+                            'use_count': p.use_count,
+                            'success_rate': p.success_rate,
+                            'score': p.last_score,
+                            'avg_response_time': avg_response_time,
+                            'consecutive_failures': p.consecutive_failures,
+                            'last_used': last_used
+                        })
+                    except Exception as e:
+                        # 如果单个代理信息获取失败，跳过它
+                        logger.warning(f"获取代理 {p.ip}:{p.port} 统计信息失败: {e}")
+                        continue
+                
+                return {
+                    'total_proxies': len(self.proxies),
+                    'active_proxies': len(active_proxies),
+                    'pool_size': len(self.proxies),  # 兼容性字段
+                    'available_proxies': len(active_proxies),  # 兼容性字段
+                    'running': self.running,
+                    'check_interval': self.check_interval,
+                    'last_refresh': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'proxy_details': proxy_details
+                }
+        except Exception as e:
+            logger.error(f"获取代理统计信息失败: {e}")
             return {
-                'total_proxies': len(self.proxies),
-                'active_proxies': len(active_proxies),
-                'running': self.running,
-                'check_interval': self.check_interval,
-                'last_refresh': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'proxy_details': [{
-                    'ip': p.ip,
-                    'port': p.port,
-                    'age_seconds': p.age_seconds,
-                    'use_count': p.use_count,
-                    'success_rate': p.success_rate,
-                    'score': p.last_score,
-                    'avg_response_time': sum(p.response_times) / len(p.response_times) if p.response_times else None,
-                    'consecutive_failures': p.consecutive_failures,
-                    'last_used': p.last_used_at.strftime('%Y-%m-%d %H:%M:%S') if p.last_used_at else None
-                } for p in self.proxies]
+                'total_proxies': 0,
+                'active_proxies': 0,
+                'pool_size': 0,
+                'available_proxies': 0,
+                'running': False,
+                'check_interval': 0,
+                'last_refresh': '获取失败',
+                'proxy_details': []
             }
 
 
@@ -542,7 +635,11 @@ class ProxyManager:
             self.proxy_pool = None
             self.initialized = True
     
-    def initialize(self, config_file: str):
+    def is_initialized(self) -> bool:
+        """检查代理池是否已初始化"""
+        return self.proxy_pool is not None and self.proxy_pool.running
+    
+    def initialize(self, config_file: str) -> bool:
         """初始化代理池"""
         if config_file and os.path.exists(config_file):
             try:
@@ -560,8 +657,16 @@ class ProxyManager:
                     )
                     self.proxy_pool.start()
                     logger.info("代理池初始化成功")
+                    return True
+                else:
+                    logger.info("代理功能已禁用")
+                    return False
             except Exception as e:
                 logger.error(f"初始化代理池失败: {e}")
+                return False
+        else:
+            logger.warning(f"代理配置文件不存在: {config_file}")
+            return False
     
     def start(self):
         """启动代理池"""
@@ -589,10 +694,46 @@ class ProxyManager:
             'check_interval': 0,
             'last_refresh': '-'
         }
+    
+    def get_status(self) -> Dict:
+        """获取代理状态（兼容EnhancedBaseCrawler）"""
+        if self.proxy_pool:
+            stats = self.proxy_pool.get_proxy_stats()
+            current_proxy = self.proxy_pool.get_proxy()
+            return {
+                'enabled': True,
+                'current_proxy': {
+                    'ip': current_proxy.ip,
+                    'port': current_proxy.port,
+                    'use_count': current_proxy.use_count,
+                    'success_rate': current_proxy.success_rate
+                } if current_proxy else None,
+                'pool_size': stats.get('pool_size', 0),
+                'available_proxies': stats.get('available_proxies', 0)
+            }
+        else:
+            return {
+                'enabled': False,
+                'current_proxy': None,
+                'pool_size': 0,
+                'available_proxies': 0
+            }
+    
+    def report_result(self, proxy_info, success: bool, response_time: Optional[float] = None):
+        """报告代理使用结果（兼容EnhancedBaseCrawler）"""
+        if self.proxy_pool and proxy_info:
+            self.proxy_pool.report_proxy_result(proxy_info, success, response_time)
 
 
 # 全局代理管理器实例
 _proxy_manager = ProxyManager()
+
+# 全局代理状态管理
+_global_proxy_enabled = True
+_global_proxy_lock = threading.Lock()
+_global_current_proxy = None
+_global_proxy_fail_count = 0
+_global_max_fail_count = 3  # 最大失败次数后切换代理
 
 
 def initialize_proxy_pool(config_file: str):
@@ -607,4 +748,83 @@ def get_proxy() -> Optional[Dict[str, str]]:
 
 def get_proxy_stats() -> Dict:
     """获取代理统计信息"""
-    return _proxy_manager.get_stats() 
+    return _proxy_manager.get_stats()
+
+
+def set_global_proxy_enabled(enabled: bool):
+    """设置全局代理启用状态"""
+    global _global_proxy_enabled
+    with _global_proxy_lock:
+        _global_proxy_enabled = enabled
+        if not enabled:
+            _global_current_proxy = None
+            _global_proxy_fail_count = 0
+
+
+def is_global_proxy_enabled() -> bool:
+    """检查全局代理是否启用"""
+    return _global_proxy_enabled
+
+
+def get_shared_proxy() -> Optional[Dict[str, str]]:
+    """获取共享代理 - 所有爬虫使用同一个代理直到失效"""
+    global _global_current_proxy, _global_proxy_fail_count
+    
+    if not _global_proxy_enabled:
+        return None
+    
+    with _global_proxy_lock:
+        # 如果当前代理失败次数过多，切换新代理
+        if _global_proxy_fail_count >= _global_max_fail_count:
+            _global_current_proxy = None
+            _global_proxy_fail_count = 0
+        
+        # 如果没有当前代理，获取新代理
+        if _global_current_proxy is None:
+            try:
+                proxy_info = _proxy_manager.get_proxy()
+                if proxy_info:
+                    if hasattr(proxy_info, 'ip') and hasattr(proxy_info, 'port'):
+                        _global_current_proxy = {
+                            'http': f'http://{proxy_info.ip}:{proxy_info.port}',
+                            'https': f'http://{proxy_info.ip}:{proxy_info.port}'
+                        }
+                    elif isinstance(proxy_info, dict) and 'ip' in proxy_info and 'port' in proxy_info:
+                        _global_current_proxy = {
+                            'http': f'http://{proxy_info["ip"]}:{proxy_info["port"]}',
+                            'https': f'http://{proxy_info["ip"]}:{proxy_info["port"]}'
+                        }
+                    else:
+                        _global_current_proxy = None
+                else:
+                    _global_current_proxy = None
+            except Exception as e:
+                logger.error(f"获取共享代理失败: {e}")
+                _global_current_proxy = None
+        
+        return _global_current_proxy
+
+
+def report_shared_proxy_result(success: bool):
+    """报告共享代理使用结果"""
+    global _global_proxy_fail_count
+    
+    if not _global_proxy_enabled:
+        return
+    
+    with _global_proxy_lock:
+        if success:
+            _global_proxy_fail_count = 0  # 成功时重置失败计数
+        else:
+            _global_proxy_fail_count += 1
+            logger.warning(f"共享代理失败，失败次数: {_global_proxy_fail_count}/{_global_max_fail_count}")
+
+
+def get_shared_proxy_status() -> Dict:
+    """获取共享代理状态"""
+    return {
+        'enabled': _global_proxy_enabled,
+        'current_proxy': _global_current_proxy,
+        'fail_count': _global_proxy_fail_count,
+        'max_fail_count': _global_max_fail_count
+    } 

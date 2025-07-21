@@ -115,9 +115,25 @@ class PersistentProxyInfo:
         # 构建代理字典
         proxy_str = f"{self.ip}:{self.port}"
         
-        # 检查是否需要认证
-        username = getattr(self, 'username', None)
-        password = getattr(self, 'password', None)
+        # 检查是否需要认证 - 从配置文件读取
+        try:
+            config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                username = config.get('username', '')
+                password = config.get('password', '')
+            else:
+                username = ''
+                password = ''
+        except Exception as e:
+            logger.warning(f"读取代理配置文件失败: {e}")
+            username = ''
+            password = ''
+        
+        # 保存认证信息
+        self.username = username
+        self.password = password
         
         if username and password:
             # 带认证的代理格式
@@ -125,12 +141,14 @@ class PersistentProxyInfo:
                 'http': f'http://{username}:{password}@{proxy_str}',
                 'https': f'http://{username}:{password}@{proxy_str}'
             }
+            logger.info(f"使用带认证的代理: {username}@{proxy_str}")
         else:
             # 无认证的代理格式
             self.proxy_dict = {
                 'http': f'http://{proxy_str}',
                 'https': f'http://{proxy_str}'
             }
+            logger.info(f"使用无认证的代理: {proxy_str}")
         
         # 代理状态跟踪
         self.created_at = datetime.now()
@@ -141,10 +159,6 @@ class PersistentProxyInfo:
         self.success_count = 0
         self.failure_count = 0
         self.consecutive_failures = 0
-        
-        # 认证信息
-        self.username = None
-        self.password = None
         
         # 失效检测
         self.is_active = True
@@ -451,18 +465,74 @@ class PersistentProxyManager:
                 self._save_state()
                 logger.info(f"强制刷新后获取新代理: {new_proxy.ip}:{new_proxy.port}")
     
+    def clear_proxy(self):
+        """清空当前代理"""
+        try:
+            # 使用超时机制获取锁
+            if self.lock.acquire(timeout=2.0):  # 最多等待2秒
+                try:
+                    if self.current_proxy:
+                        logger.info(f"清空当前代理: {self.current_proxy.ip}:{self.current_proxy.port}")
+                        self.current_proxy = None
+                        self._save_state()
+                        logger.info("代理已清空")
+                    else:
+                        logger.info("当前没有活跃代理")
+                finally:
+                    self.lock.release()
+            else:
+                logger.warning("获取代理锁超时，跳过清空操作")
+        except Exception as e:
+            logger.error(f"清空代理时出错: {e}")
+            # 确保锁被释放
+            try:
+                if self.lock.locked():
+                    self.lock.release()
+            except:
+                pass
+    
+    def reset_proxy_state(self):
+        """重置代理状态（清空代理并删除状态文件）"""
+        with self.lock:
+            # 清空当前代理
+            if self.current_proxy:
+                logger.info(f"清空当前代理: {self.current_proxy.ip}:{self.current_proxy.port}")
+                self.current_proxy = None
+            
+            # 删除状态文件
+            try:
+                if os.path.exists(self.state_file):
+                    os.remove(self.state_file)
+                    logger.info(f"已删除代理状态文件: {self.state_file}")
+                else:
+                    logger.info("代理状态文件不存在")
+            except Exception as e:
+                logger.error(f"删除代理状态文件失败: {e}")
+            
+            logger.info("代理状态已重置")
+    
     def get_status(self) -> Dict:
         """获取代理状态信息"""
         with self.lock:
+            # 检查代理是否启用
+            proxy_enabled = self.config.get('enabled', False)
+            
+            if not proxy_enabled:
+                return {
+                    'enabled': False,
+                    'current_proxy': None,
+                    'status': 'disabled'
+                }
+            
             if not self.current_proxy:
                 return {
-                    'enabled': self.config.get('enabled', False),
+                    'enabled': True,
                     'current_proxy': None,
                     'status': 'no_proxy'
                 }
             
             return {
-                'enabled': self.config.get('enabled', False),
+                'enabled': True,
                 'current_proxy': {
                     'ip': self.current_proxy.ip,
                     'port': self.current_proxy.port,
