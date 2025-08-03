@@ -20,6 +20,7 @@ import requests
 from .enhanced_base_crawler import EnhancedBaseCrawler
 from .multithread_base_crawler import MultiThreadBaseCrawler
 from .monitor import CrawlerMonitor
+from ..core import database as db
 
 # 机构名称常量
 LEVEL_NAME = "广东省人民政府"
