@@ -19,7 +19,7 @@ class MNRSpider:
     自然资源部 法律法规库 爬虫
     """
     def __init__(self):
-        self.base_url = 'https://f.mnr.gov.cn/'
+        self.base_url = 'https://gi.mnr.gov.cn/'
         self.search_api = 'https://search.mnr.gov.cn/was5/web/search'
         self.ajax_api = 'https://search.mnr.gov.cn/was/ajaxdata_jsonp.jsp'
         self.level = '自然资源部'
@@ -33,24 +33,40 @@ class MNRSpider:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Referer': 'https://f.mnr.gov.cn/',
+            'Referer': 'https://gi.mnr.gov.cn/',
             'X-Requested-With': 'XMLHttpRequest'
         }
         self.max_pages = 999999  # 最大翻页数（无上限）
-        self.channel_id = '174757'  # 法律法规库的频道ID
+        self.channel_id = '216640'  # 政府信息公开平台的频道ID
         
-        # 分类配置
+        # 分类配置 - 更新为新的政府信息公开平台分类
         self.categories = {
-            '综合管理': {'code': '579/580', 'name': '综合管理'},
-            '土地管理': {'code': '579/581', 'name': '土地管理'},
-            '自然资源确权登记': {'code': '579/582', 'name': '自然资源确权登记'},
-            '地质': {'code': '579/583', 'name': '地质'},
-            '地质环境管理': {'code': '579/584', 'name': '地质环境管理'},
-            '矿产资源管理': {'code': '579/585', 'name': '矿产资源管理'},
-            '海洋管理': {'code': '579/586', 'name': '海洋管理'},
-            '测绘地理信息管理': {'code': '579/587', 'name': '测绘地理信息管理'},
-            '法律': {'code': '569/570', 'name': '法律'},
-            '司法解释': {'code': '569/577', 'name': '司法解释'}
+            '自然资源调查监测': {'code': '1318', 'name': '自然资源调查监测'},
+            '自然资源确权登记': {'code': '1319', 'name': '自然资源确权登记'},
+            '自然资源合理开发利用': {'code': '1320', 'name': '自然资源合理开发利用'},
+            '自然资源有偿使用': {'code': '1321', 'name': '自然资源有偿使用'},
+            '国土空间规划': {'code': '1322', 'name': '国土空间规划'},
+            '国土空间用途管制': {'code': '1663', 'name': '国土空间用途管制'},
+            '国土空间生态修复': {'code': '1324', 'name': '国土空间生态修复'},
+            '耕地保护': {'code': '1325', 'name': '耕地保护'},
+            '地质勘查': {'code': '1326', 'name': '地质勘查'},
+            '矿产勘查': {'code': '1327', 'name': '矿产勘查'},
+            '矿产保护': {'code': '1328', 'name': '矿产保护'},
+            '海洋预警监测': {'code': '1329', 'name': '海洋预警监测'},
+            '海域海岛管理': {'code': '1330', 'name': '海域海岛管理'},
+            '海洋预警': {'code': '1331', 'name': '海洋预警'},
+            '海洋经济': {'code': '1664', 'name': '海洋经济'},
+            '国家测绘': {'code': '1332', 'name': '国家测绘'},
+            '地理信息管理': {'code': '1333', 'name': '地理信息管理'},
+            '自然资源督察': {'code': '1334', 'name': '自然资源督察'},
+            '法规': {'code': '1335', 'name': '法规'},
+            '测绘管理': {'code': '1336', 'name': '测绘管理'},
+            '财务管理': {'code': '1337', 'name': '财务管理'},
+            '人事管理': {'code': '1662', 'name': '人事管理'},
+            '矿业权评估': {'code': '1338', 'name': '矿业权评估'},
+            '机构建设': {'code': '1339', 'name': '机构建设'},
+            '综合管理': {'code': '1340', 'name': '综合管理'},
+            '其他': {'code': '1341', 'name': '其他'}
         }
 
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
@@ -123,10 +139,22 @@ class MNRSpider:
                     callback(f"分类[{category_name}]正在抓取第{page}页...")
                     
                 try:
-                    # 构建搜索参数
+                    # 构建搜索参数 - 先尝试简单搜索
+                    if search_word:
+                        search_query = search_word
+                    else:
+                        search_query = ""
+                    
+                    # 暂时不使用分类代码，先测试基本搜索功能
+                    # if category_name and category_name in self.categories:
+                    #     category_code = self.categories[category_name]['code']
+                    #     search_query = f"themecat=({category_code})"
+                    #     if search_word:
+                    #         search_query += f" and (TITLE/10=like('{search_word}') or SEARCHCONTENT/1=like('{search_word}'))"
+                    
                     params = {
                         'channelid': self.channel_id,
-                        'searchword': search_word,
+                        'searchword': search_query,
                         'page': page,
                         'perpage': 20,  # 每页20条
                         'searchtype': 'title',  # 搜索标题
@@ -162,7 +190,7 @@ class MNRSpider:
                     except json.JSONDecodeError:
                         # 如果不是JSON，尝试解析HTML
                         soup = BeautifulSoup(resp.text, 'html.parser')
-                        page_policies = self._parse_html_results(soup, callback)
+                        page_policies = self._parse_html_results(soup, callback, category_name)
                     else:
                         page_policies = self._parse_json_results(search_data, callback)
                     
@@ -307,72 +335,94 @@ class MNRSpider:
         
         return policies
 
-    def _parse_html_results(self, soup, callback):
+    def _parse_html_results(self, soup, callback, category_name=''):
         """解析HTML格式的搜索结果"""
         policies = []
         
         try:
-            # 查找政策列表 - 使用正确的选择器
-            ul = soup.find('ul', id='ul')
-            if not ul:
+            # 查找政策列表 - 适配新的网站结构
+            table = soup.find('table', class_='table')
+            if not table:
                 if callback:
-                    callback("未找到政策列表容器")
+                    callback("未找到政策列表表格")
                 return policies
             
-            # 查找所有政策项
-            policy_items = ul.find_all('li', class_='p123')
+            # 查找所有政策行（跳过表头）
+            rows = table.find_all('tr')[1:]  # 跳过第一行表头
             if callback:
-                callback(f"找到 {len(policy_items)} 条政策")
+                callback(f"找到 {len(rows)} 条政策")
             
-            for item in policy_items:
+            for row in rows:
                 try:
-                    # 标题和详情页链接
-                    a = item.select_one('div.ffbox a[target="_blank"]')
-                    if not a:
+                    # 获取所有单元格
+                    cells = row.find_all('td')
+                    if len(cells) < 4:
                         continue
-                        
-                    title = a.get_text(strip=True)
-                    detail_url = a.get('href', '')
                     
-                    # 详细字段 - 从表格中提取
-                    dasite = item.select_one('div.dasite table')
-                    tds = dasite.find_all('td') if dasite else []
+                    # 检查是否是主政策行（不是详细信息行）
+                    first_cell = cells[0].get_text(strip=True)
+                    if not first_cell or first_cell in ['标    题', '索    引', '发文字号', '生成日期', '实施日期']:
+                        # 这是详细信息行，跳过
+                        continue
                     
-                    # 解析表格数据
-                    doc_number = ''
-                    pub_date = ''
-                    publish_org = ''
-                    area = ''
-                    business_type = ''
-                    effect_level = ''
-                    abolish_record = ''
-                    status = ''
+                    # 检查是否是有效的政策索引号（应该包含年份和编号）
+                    if not first_cell or len(first_cell) < 4 or not first_cell[0].isdigit():
+                        continue
                     
-                    for i in range(0, len(tds), 2):
-                        if i + 1 < len(tds):
-                            label = tds[i].get_text(strip=True)
-                            value = tds[i + 1].get_text(strip=True)
-                            
-                            if '文号' in label:
-                                doc_number = value
-                            elif '成文时间' in label or '发文时间' in label:
-                                pub_date = value
-                            elif '发布机构' in label:
-                                publish_org = value
-                            elif '适用区域' in label:
-                                area = value
-                            elif '业务类型' in label:
-                                business_type = value
-                            elif '效力级别' in label:
-                                effect_level = value
-                            elif '废止记录' in label:
-                                abolish_record = value
-                            elif '时效状态' in label:
-                                status = value
+                    # 解析表格数据 - 适配新结构
+                    index = cells[0].get_text(strip=True)
+                    title_cell = cells[1]
+                    doc_number = cells[2].get_text(strip=True)
+                    pub_date = cells[3].get_text(strip=True)
+                    
+                    # 获取标题和链接 - 新网站的结构
+                    title_link = title_cell.find('a', target='_blank')
+                    if not title_link:
+                        # 尝试其他方式查找链接
+                        title_link = title_cell.find('a')
+                    
+                    if not title_link:
+                        continue
+                    
+                    title = title_link.get_text(strip=True)
+                    detail_url = title_link.get('href', '')
+                    
+                    # 检查解析的数据是否合理
+                    if doc_number == "标    题" or pub_date == title:
+                        # 如果发文字号是"标    题"或发布日期是标题内容，说明解析到了详细信息
+                        # 尝试从详细信息中获取正确的数据
+                        detail_info = title_cell.find('div', class_='box')
+                        if detail_info:
+                            detail_table = detail_info.find('table')
+                            if detail_table:
+                                detail_rows = detail_table.find_all('tr')
+                                for detail_row in detail_rows:
+                                    detail_cells = detail_row.find_all('td')
+                                    if len(detail_cells) >= 2:
+                                        label = detail_cells[0].get_text(strip=True)
+                                        value = detail_cells[1].get_text(strip=True)
+                                        
+                                        if '发文字号' in label:
+                                            doc_number = value
+                                        elif '生成日期' in label:
+                                            pub_date = value
+                    
+
                     
                     # 构建完整链接
                     if detail_url and not detail_url.startswith('http'):
                         detail_url = urljoin(self.base_url, detail_url)
+                    
+                    # 尝试从详细信息中获取更多数据
+                    detail_info = title_cell.find('div', class_='box')
+                    if detail_info:
+                        # 提取发文字号
+                        doc_number_cells = detail_info.find_all('td')
+                        for i, cell in enumerate(doc_number_cells):
+                            if '发文字号' in cell.get_text():
+                                if i + 1 < len(doc_number_cells):
+                                    doc_number = doc_number_cells[i + 1].get_text(strip=True)
+                                break
                     
                     policy = {
                         'level': self.level,
@@ -382,8 +432,8 @@ class MNRSpider:
                         'source': detail_url,
                         'content': '',
                         'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'category': business_type,
-                        'validity': status,
+                        'category': category_name,
+                        'validity': '',
                         'effective_date': '',
                         'link': detail_url
                     }

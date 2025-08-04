@@ -25,7 +25,7 @@ class RAGExportWorker(QThread):
     export_error = pyqtSignal(str)
     
     def __init__(self, data, output_dir, format_type, max_chunk_size, 
-                 max_file_size_mb=100, max_files_per_chunk=50):
+                 max_file_size_mb=10000, max_files_per_chunk=10000):
         super().__init__()
         self.data = data
         self.output_dir = output_dir
@@ -256,15 +256,15 @@ class RAGExportDialog(QDialog):
         layout.addWidget(naming_group)
         
         # 分片设置
-        chunking_group = QGroupBox("分片设置")
+        chunking_group = QGroupBox("分片设置（可选）")
         chunking_layout = QVBoxLayout()
         
         # 最大文件大小设置
         size_layout = QHBoxLayout()
         size_layout.addWidget(QLabel("最大文件大小 (MB):"))
         self.max_file_size_spin = QSpinBox()
-        self.max_file_size_spin.setRange(10, 200)
-        self.max_file_size_spin.setValue(100)
+        self.max_file_size_spin.setRange(10, 50000)
+        self.max_file_size_spin.setValue(10000)
         self.max_file_size_spin.setSuffix(" MB")
         size_layout.addWidget(self.max_file_size_spin)
         size_layout.addStretch()
@@ -274,15 +274,15 @@ class RAGExportDialog(QDialog):
         count_layout = QHBoxLayout()
         count_layout.addWidget(QLabel("每个分片最大文件数:"))
         self.max_files_per_chunk_spin = QSpinBox()
-        self.max_files_per_chunk_spin.setRange(10, 100)
-        self.max_files_per_chunk_spin.setValue(50)
+        self.max_files_per_chunk_spin.setRange(10, 50000)
+        self.max_files_per_chunk_spin.setValue(10000)
         self.max_files_per_chunk_spin.setSuffix(" 个")
         count_layout.addWidget(self.max_files_per_chunk_spin)
         count_layout.addStretch()
         chunking_layout.addLayout(count_layout)
         
         # 分片说明
-        chunking_info = QLabel("💡 系统限制：最大100MB，最多50个文件。分片导出可自动分割为符合限制的文件包。")
+        chunking_info = QLabel("💡 已取消分片限制，所有文件将导出到单个文件中。")
         chunking_info.setStyleSheet("color: #666; font-size: 12px;")
         chunking_layout.addWidget(chunking_info)
         
@@ -447,14 +447,21 @@ output_directory/
             # 构建分片信息
             chunks_info = ""
             if 'chunks' in result and result['chunks']:
-                chunks_info = f"\n分片信息:\n"
-                for chunk in result['chunks']:
-                    chunks_info += f"  分片 {chunk['chunk_num']}: {chunk['total_files']} 个文件, {chunk['total_size_mb']} MB\n"
+                if len(result['chunks']) == 1 and result['chunks'][0]['total_files'] == 1:
+                    # 单个文件导出
+                    chunk = result['chunks'][0]
+                    chunks_info = f"\n导出文件: {chunk['files_created'][0]['filename']}\n"
+                    chunks_info += f"文件大小: {chunk['total_size_mb']} MB"
+                else:
+                    # 分片导出
+                    chunks_info = f"\n分片信息:\n"
+                    for chunk in result['chunks']:
+                        chunks_info += f"  分片 {chunk['chunk_num']}: {chunk['total_files']} 个文件, {chunk['total_size_mb']} MB\n"
             
             QMessageBox.information(
                 self, 
                 "导出成功", 
-                f"RAG知识库分片导出完成！\n\n"
+                f"RAG知识库导出完成！\n\n"
                 f"输出目录: {result.get('output_dir', '未指定')}\n"
                 f"政策数量: {result['total_policies']}\n"
                 f"段落数量: {result['total_segments']}\n"

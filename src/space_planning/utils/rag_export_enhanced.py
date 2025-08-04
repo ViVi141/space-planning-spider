@@ -21,8 +21,8 @@ class RAGChunkExporter:
     """RAG分片导出器"""
     
     def __init__(self, 
-                 max_file_size_mb: int = 100,
-                 max_files_per_chunk: int = 50,
+                 max_file_size_mb: int = 10000,
+                 max_files_per_chunk: int = 10000,
                  max_chunk_size: int = 4096):
         self.max_file_size_mb = max_file_size_mb
         self.max_files_per_chunk = max_files_per_chunk
@@ -124,22 +124,21 @@ class RAGChunkExporter:
             # 生成政策内容
             content = self._generate_policy_content(policy)
             
-            # 分段处理
-            if format_type == 'markdown':
-                policy_segments = self.segmenter.segment_markdown(content)
-            else:
-                policy_segments = self.segmenter.segment_txt_pdf(content)
-            
-            # 添加政策信息到分段
-            for segment in policy_segments:
-                segment['policy_info'] = {
+            # 将每个政策作为一个整体，不进行分段
+            segment = {
+                'title': policy['title'],
+                'level': 1,
+                'content': content,
+                'size': len(content),
+                'policy_info': {
                     'level': policy['level'],
                     'title': policy['title'],
                     'pub_date': policy['pub_date'],
                     'source': policy['source'],
                     'category': policy['category']
                 }
-                segments.append(segment)
+            }
+            segments.append(segment)
         
         return segments
     
@@ -175,19 +174,31 @@ class RAGChunkExporter:
         """导出分片"""
         export_results = []
         
-        for i, chunk in enumerate(chunks):
-            chunk_dir = os.path.join(output_dir, f"chunk_{i+1:03d}")
-            os.makedirs(chunk_dir, exist_ok=True)
-            
-            # 导出分片
+        # 如果只有一个分片且分片大小很大，直接导出到单个文件
+        if len(chunks) == 1 and self.max_file_size_mb > 1000:
+            # 导出到单个文件
             if format_type == 'markdown':
-                result = self._export_markdown_chunk(chunk, chunk_dir, i+1)
+                result = self._export_single_markdown_file(chunks[0], output_dir)
             elif format_type == 'json':
-                result = self._export_json_chunk(chunk, chunk_dir, i+1)
+                result = self._export_single_json_file(chunks[0], output_dir)
             else:  # txt
-                result = self._export_txt_chunk(chunk, chunk_dir, i+1)
-            
+                result = self._export_single_txt_file(chunks[0], output_dir)
             export_results.append(result)
+        else:
+            # 正常分片导出
+            for i, chunk in enumerate(chunks):
+                chunk_dir = os.path.join(output_dir, f"chunk_{i+1:03d}")
+                os.makedirs(chunk_dir, exist_ok=True)
+                
+                # 导出分片
+                if format_type == 'markdown':
+                    result = self._export_markdown_chunk(chunk, chunk_dir, i+1)
+                elif format_type == 'json':
+                    result = self._export_json_chunk(chunk, chunk_dir, i+1)
+                else:  # txt
+                    result = self._export_txt_chunk(chunk, chunk_dir, i+1)
+                
+                export_results.append(result)
         
         return export_results
     
@@ -226,6 +237,122 @@ class RAGChunkExporter:
             'chunk_dir': chunk_dir,
             'files_created': files_created,
             'total_files': len(files_created),
+            'total_size_bytes': total_size,
+            'total_size_mb': round(total_size / (1024 * 1024), 2)
+        }
+    
+    def _export_single_markdown_file(self, chunk: List[Dict], output_dir: str) -> Dict:
+        """导出单个Markdown文件"""
+        filename = f"rag_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        filepath = os.path.join(output_dir, filename)
+        
+        total_size = 0
+        files_created = []
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("# RAG知识库\n\n")
+            f.write(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("---\n\n")
+            
+            for i, segment in enumerate(chunk):
+                content = self._generate_markdown_content(segment)
+                f.write(content)
+                f.write("\n\n---\n\n")
+                
+                file_size = len(content.encode('utf-8'))
+                files_created.append({
+                    'filename': filename,
+                    'size_bytes': file_size,
+                    'title': segment['title'],
+                    'policy_title': segment['policy_info']['title']
+                })
+                total_size += file_size
+        
+        return {
+            'chunk_num': 1,
+            'chunk_dir': output_dir,
+            'files_created': files_created,
+            'total_files': 1,
+            'total_size_bytes': total_size,
+            'total_size_mb': round(total_size / (1024 * 1024), 2)
+        }
+    
+    def _export_single_json_file(self, chunk: List[Dict], output_dir: str) -> Dict:
+        """导出单个JSON文件"""
+        filename = f"rag_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        total_size = 0
+        files_created = []
+        
+        data = {
+            'export_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_segments': len(chunk),
+            'segments': []
+        }
+        
+        for segment in chunk:
+            segment_data = {
+                'title': segment['title'],
+                'level': segment['level'],
+                'content': segment['content'],
+                'policy_info': segment['policy_info']
+            }
+            data['segments'].append(segment_data)
+            total_size += len(str(segment_data).encode('utf-8'))
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        
+        files_created.append({
+            'filename': filename,
+            'size_bytes': total_size,
+            'title': 'RAG知识库',
+            'policy_title': 'JSON格式'
+        })
+        
+        return {
+            'chunk_num': 1,
+            'chunk_dir': output_dir,
+            'files_created': files_created,
+            'total_files': 1,
+            'total_size_bytes': total_size,
+            'total_size_mb': round(total_size / (1024 * 1024), 2)
+        }
+    
+    def _export_single_txt_file(self, chunk: List[Dict], output_dir: str) -> Dict:
+        """导出单个TXT文件"""
+        filename = f"rag_knowledge_base_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        filepath = os.path.join(output_dir, filename)
+        
+        total_size = 0
+        files_created = []
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write("RAG知识库\n")
+            f.write("=" * 50 + "\n")
+            f.write(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            for i, segment in enumerate(chunk):
+                content = self._generate_txt_content(segment)
+                f.write(content)
+                f.write("\n" + "=" * 50 + "\n\n")
+                
+                file_size = len(content.encode('utf-8'))
+                files_created.append({
+                    'filename': filename,
+                    'size_bytes': file_size,
+                    'title': segment['title'],
+                    'policy_title': segment['policy_info']['title']
+                })
+                total_size += file_size
+        
+        return {
+            'chunk_num': 1,
+            'chunk_dir': output_dir,
+            'files_created': files_created,
+            'total_files': 1,
             'total_size_bytes': total_size,
             'total_size_mb': round(total_size / (1024 * 1024), 2)
         }
@@ -408,7 +535,7 @@ class RAGChunkExporter:
         # 移除HTML标签
         content = re.sub(r'<[^>]+>', '', content)
         
-        # 移除特殊字符
+        # 移除特殊字符，保留中文、英文、数字、基本标点
         content = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9\s\.,，。！？；：""''（）()【】\[\]]', '', content)
         
         return content
@@ -576,7 +703,7 @@ class RAGSegmenter:
         return segments
 
 def export_rag_with_chunking(data, output_dir, format_type='markdown', 
-                            max_file_size_mb=100, max_files_per_chunk=50, max_chunk_size=4096):
+                            max_file_size_mb=10000, max_files_per_chunk=10000, max_chunk_size=4096):
     """分片导出RAG知识库的主函数"""
     exporter = RAGChunkExporter(
         max_file_size_mb=max_file_size_mb,
