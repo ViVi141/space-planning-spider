@@ -296,7 +296,12 @@ class RAGChunkExporter:
                 'title': segment['title'],
                 'level': segment['level'],
                 'content': segment['content'],
-                'policy_info': segment['policy_info']
+                'policy_info': {
+                    'level': segment['policy_info']['level'],
+                    'title': segment['policy_info']['title'],
+                    'pub_date': segment['policy_info']['pub_date'],
+                    'source': segment['policy_info']['source']
+                }
             }
             data['segments'].append(segment_data)
             total_size += len(str(segment_data).encode('utf-8'))
@@ -376,7 +381,12 @@ class RAGChunkExporter:
                 'title': segment['title'],
                 'content': segment['content'],
                 'level': segment['level'],
-                'policy_info': segment['policy_info'],
+                'policy_info': {
+                    'level': segment['policy_info']['level'],
+                    'title': segment['policy_info']['title'],
+                    'pub_date': segment['policy_info']['pub_date'],
+                    'source': segment['policy_info']['source']
+                },
                 'metadata': {
                     'chunk_size': len(segment['content']),
                     'export_time': datetime.now().isoformat(),
@@ -454,17 +464,15 @@ class RAGChunkExporter:
         content_parts.append(f"# {policy['title']}")
         content_parts.append("")
         
-        # 基本信息
+        # 基本信息（简化版，避免重复）
         content_parts.append("## 基本信息")
         content_parts.append(f"- **发布机构**: {policy['level']}")
         content_parts.append(f"- **发布日期**: {policy['pub_date']}")
         content_parts.append(f"- **来源**: {policy['source']}")
-        if policy['category']:
-            content_parts.append(f"- **分类**: {policy['category']}")
         content_parts.append("")
         
         # 政策内容
-        content_parts.append("## 政策内容")
+        content_parts.append("## 内容")
         content_parts.append(policy['content'])
         content_parts.append("")
         
@@ -478,15 +486,13 @@ class RAGChunkExporter:
         content_parts.append(f"# {segment['title']}")
         content_parts.append("")
         
-        # 政策信息
+        # 政策信息（简化版，避免重复）
         policy_info = segment['policy_info']
         content_parts.append("## 政策信息")
         content_parts.append(f"- **发布机构**: {policy_info['level']}")
         content_parts.append(f"- **政策标题**: {policy_info['title']}")
         content_parts.append(f"- **发布日期**: {policy_info['pub_date']}")
         content_parts.append(f"- **来源**: {policy_info['source']}")
-        if policy_info['category']:
-            content_parts.append(f"- **分类**: {policy_info['category']}")
         content_parts.append("")
         
         # 内容
@@ -505,15 +511,13 @@ class RAGChunkExporter:
         content_parts.append("=" * 50)
         content_parts.append("")
         
-        # 政策信息
+        # 政策信息（简化版，避免重复）
         policy_info = segment['policy_info']
         content_parts.append("政策信息:")
         content_parts.append(f"  发布机构: {policy_info['level']}")
         content_parts.append(f"  政策标题: {policy_info['title']}")
         content_parts.append(f"  发布日期: {policy_info['pub_date']}")
         content_parts.append(f"  来源: {policy_info['source']}")
-        if policy_info['category']:
-            content_parts.append(f"  分类: {policy_info['category']}")
         content_parts.append("")
         
         # 内容

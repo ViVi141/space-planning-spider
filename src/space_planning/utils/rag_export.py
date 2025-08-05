@@ -392,10 +392,10 @@ class RAGExporter:
 
             # 添加政策标题和基本信息
             content += f"## {policy_id}. {policy_title}\n\n"
-            content += f"**层级：** {policy_level}\n\n"
-            content += f"**发布日期：** {policy_date}\n\n"
-            content += f"**来源：** {policy_source}\n\n"
-            content += f"**正文：**\n\n"
+            content += f"**发布机构**: {policy_level}\n\n"
+            content += f"**发布日期**: {policy_date}\n\n"
+            content += f"**来源**: {policy_source}\n\n"
+            content += f"**内容**:\n\n"
             content += f"{clean_content}\n\n"
             content += "---\n\n"
         
@@ -525,10 +525,10 @@ class RAGExporter:
 
             # 添加政策标题和基本信息
             content += f"{policy_id}. {policy_title}\n"
-            content += f"层级：{policy_level}\n"
+            content += f"发布机构：{policy_level}\n"
             content += f"发布日期：{policy_date}\n"
             content += f"来源：{policy_source}\n"
-            content += f"正文：\n"
+            content += f"内容：\n"
             content += "-" * 30 + "\n"
             content += f"{clean_content}\n\n"
             content += "=" * 50 + "\n\n"
