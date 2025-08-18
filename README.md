@@ -127,7 +127,7 @@
 ## 💬 技术支持
 - 开发者：ViVi141
 - 邮箱：747384120@qq.com
-- Gitee项目主页：https://gitee.com/ViVi141/space-planning-spider
+- Github项目主页：https://github.com/ViVi141/space-planning-spider
 
 ---
 
