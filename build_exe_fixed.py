@@ -61,8 +61,9 @@ project_root = Path.cwd()
 src_path = project_root / 'src'
 
 # 数据文件
+# 注意：不打包proxy_config.json（包含敏感信息），只打包模板文件
 datas = [
-    (str(src_path / 'space_planning' / 'gui' / 'proxy_config.json'), 'space_planning/gui'),
+    (str(src_path / 'space_planning' / 'gui' / 'proxy_config.json.template'), 'space_planning/gui'),
     (str(src_path / 'crawler_config.json'), 'space_planning'),
     (str(project_root / 'docs' / 'icon.ico'), 'docs'),
 ]

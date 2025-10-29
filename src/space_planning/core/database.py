@@ -4,9 +4,12 @@ import sys
 import shutil
 from datetime import datetime, timedelta
 import json
+import logging
 
 # 导入配置模块
 from . import config
+
+logger = logging.getLogger(__name__)
 
 def get_database_path():
     """获取数据库文件路径，使用新的配置系统"""
@@ -326,27 +329,64 @@ def deduplicate_database():
             conn.close()
 
 def search_policies(level=None, keywords=None, start_date=None, end_date=None):
-    """搜索政策，支持时间区间"""
+    """搜索政策，支持时间区间（改进：添加输入验证）"""
+    # 导入验证器
+    from ..utils.validator import InputValidator
+    
     conn = get_conn()
     c = conn.cursor()
     params = []
     date_sql = ''
     
+    # 验证日期参数
     if start_date and end_date:
-        date_sql = ' AND p.pub_date BETWEEN ? AND ?'
-        params.extend([start_date, end_date])
-    
-    if keywords:
-        # 使用全文检索
-        if level:
-            query = f"level:{level} AND ({' OR '.join(keywords)})"
+        validated_start = InputValidator.validate_date(start_date)
+        validated_end = InputValidator.validate_date(end_date)
+        if validated_start and validated_end:
+            date_sql = ' AND p.pub_date BETWEEN ? AND ?'
+            params.extend([validated_start, validated_end])
         else:
-            query = ' OR '.join(keywords)
-        sql = f'''SELECT p.id, p.level, p.title, p.pub_date, p.source, p.content, p.category 
-                  FROM policy p JOIN policy_fts fts ON p.id = fts.rowid 
-                  WHERE policy_fts MATCH ?{date_sql} ORDER BY p.pub_date DESC'''
-        c.execute(sql, (query, *params))
-    else:
+            logger.warning(f"无效的日期参数: {start_date} - {end_date}")
+    
+    # 验证和清理关键词
+    if keywords:
+        # 清理关键词（防止注入攻击）
+        sanitized_keywords = []
+        for kw in keywords:
+            if isinstance(kw, str):
+                sanitized = InputValidator.sanitize_fts_query(kw)
+                if sanitized:
+                    sanitized_keywords.append(sanitized)
+        
+        if sanitized_keywords:
+            # 使用全文检索（改进：使用清理后的关键词）
+            if level:
+                # 验证level参数
+                validated_level = InputValidator.sanitize_level(level)
+                if validated_level:
+                    query = f"level:{validated_level} AND ({' OR '.join(sanitized_keywords)})"
+                else:
+                    query = ' OR '.join(sanitized_keywords)
+            else:
+                query = ' OR '.join(sanitized_keywords)
+            
+            # 再次清理完整查询（双重保护）
+            query = InputValidator.sanitize_fts_query(query, max_length=500)
+            
+            if query:
+                sql = f'''SELECT p.id, p.level, p.title, p.pub_date, p.source, p.content, p.category 
+                          FROM policy p JOIN policy_fts fts ON p.id = fts.rowid 
+                          WHERE policy_fts MATCH ?{date_sql} ORDER BY p.pub_date DESC'''
+                c.execute(sql, (query, *params))
+            else:
+                # 查询被过滤，返回空结果
+                c.execute(f'''SELECT id, level, title, pub_date, source, content, category 
+                              FROM policy p WHERE 1=0{date_sql}''', (*params,))
+        else:
+            # 所有关键词都被过滤，使用普通查询
+            keywords = None
+    
+    if not keywords:
         # 普通查询
         if level:
             sql = f'''SELECT id, level, title, pub_date, source, content, category 

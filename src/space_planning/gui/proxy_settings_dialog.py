@@ -17,6 +17,7 @@ from kdl.auth import Auth
 from kdl.client import Client
 
 from space_planning.spider.proxy_pool import ProxyPool, get_proxy_stats
+from space_planning.utils.crypto import SecureConfig
 
 
 class ProxyTestThread(QThread):
@@ -112,9 +113,27 @@ class ProxySettingsDialog(QDialog):
         self.resize(600, 500)
         
         # 代理配置文件路径
-        self.config_file = os.path.join(os.path.dirname(__file__), 'proxy_config.json')
+        config_dir = os.path.dirname(__file__)
+        self.config_file = os.path.join(config_dir, 'proxy_config.json')
+        self.config_template = os.path.join(config_dir, 'proxy_config.json.template')
         
-        # 初始化代理配置
+        # 如果配置文件不存在，从模板创建
+        if not os.path.exists(self.config_file):
+            if os.path.exists(self.config_template):
+                import shutil
+                shutil.copy2(self.config_template, self.config_file)
+                print(f"已从模板创建配置文件: {self.config_file}")
+        
+        # 初始化安全配置管理器
+        self.secure_config = SecureConfig(self.config_file)
+        
+        # 迁移现有明文配置到加密（如果存在）
+        try:
+            self.secure_config.migrate_plaintext_to_encrypted()
+        except Exception as e:
+            print(f"配置迁移失败: {e}")
+        
+        # 初始化代理配置（从加密配置读取）
         self.proxy_config = self.load_config()
         
         # 初始化代理系统（仅在用户进入代理设置时）
@@ -127,15 +146,14 @@ class ProxySettingsDialog(QDialog):
         self._load_config_to_ui()
     
     def load_config(self):
-        """加载代理配置"""
+        """加载代理配置（支持加密读取）"""
         try:
-            if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    return config
-            else:
-                # 返回默认配置
-                return {
+            # 使用安全配置管理器读取（自动解密敏感信息）
+            config = self.secure_config.get_all_config()
+            
+            # 如果配置文件不存在，返回默认配置
+            if not config:
+                config = {
                     'enabled': False,
                     'secret_id': '',
                     'secret_key': '',
@@ -144,6 +162,22 @@ class ProxySettingsDialog(QDialog):
                     'max_proxies': 5,
                     'check_interval': 300
                 }
+            
+            # 确保所有字段都存在
+            default_config = {
+                'enabled': False,
+                'secret_id': '',
+                'secret_key': '',
+                'username': '',
+                'password': '',
+                'max_proxies': 5,
+                'check_interval': 300
+            }
+            for key, default_value in default_config.items():
+                if key not in config:
+                    config[key] = default_value
+            
+            return config
         except Exception as e:
             print(f"加载代理配置失败: {e}")
             # 返回默认配置
@@ -158,14 +192,37 @@ class ProxySettingsDialog(QDialog):
             }
     
     def save_config(self):
-        """保存代理配置"""
+        """保存代理配置（使用加密存储敏感信息）"""
         try:
-            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.proxy_config, f, ensure_ascii=False, indent=2)
+            # 使用安全配置管理器保存
+            # 保存非敏感配置
+            config = {
+                'enabled': self.proxy_config.get('enabled', False),
+                'max_proxies': self.proxy_config.get('max_proxies', 5),
+                'check_interval': self.proxy_config.get('check_interval', 300),
+                'username': self.proxy_config.get('username', '')  # 用户名通常不算敏感
+            }
+            self.secure_config._save_config(config)
+            
+            # 加密保存敏感信息
+            secret_id = self.proxy_config.get('secret_id', '')
+            secret_key = self.proxy_config.get('secret_key', '')
+            password = self.proxy_config.get('password', '')
+            
+            if secret_id:
+                self.secure_config.set_sensitive('secret_id', secret_id)
+            if secret_key:
+                self.secure_config.set_sensitive('secret_key', secret_key)
+            if password:
+                self.secure_config.set_sensitive('password', password)
+            
+            print("代理配置已保存（敏感信息已加密）")
             return True
         except Exception as e:
             QMessageBox.warning(self, "保存失败", f"保存配置失败: {e}")
+            print(f"保存配置异常: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def init_ui(self):
@@ -485,7 +542,7 @@ class ProxySettingsDialog(QDialog):
                 pass
 
     def _load_config_to_ui(self):
-        """从配置加载数据到UI"""
+        """从配置加载数据到UI（自动解密敏感信息）"""
         self.enable_proxy.setChecked(self.proxy_config.get('enabled', False))
         self.secret_id_edit.setText(self.proxy_config.get('secret_id', ''))
         self.secret_key_edit.setText(self.proxy_config.get('secret_key', ''))

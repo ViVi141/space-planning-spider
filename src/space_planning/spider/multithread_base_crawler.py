@@ -26,7 +26,8 @@ class MultiThreadBaseCrawler:
         self.max_workers = max_workers
         self.enable_proxy = enable_proxy
         
-        # 线程管理
+        # 线程管理（改进：使用RLock和更好的资源管理）
+        self.thread_resources_lock = threading.RLock()  # 可重入锁，保护线程资源字典
         self.thread_sessions = {}  # 线程专用会话
         self.thread_locks = {}     # 线程锁
         self.thread_proxies = {}   # 线程专用代理
@@ -36,8 +37,8 @@ class MultiThreadBaseCrawler:
         self.result_queue = queue.Queue()
         self.error_queue = queue.Queue()
         
-        # 统计管理
-        self.stats_lock = threading.Lock()
+        # 统计管理（改进：使用RLock）
+        self.stats_lock = threading.RLock()
         self.stats = {
             'total_tasks': 0,
             'completed_tasks': 0,
@@ -51,11 +52,11 @@ class MultiThreadBaseCrawler:
         
         # 去重管理
         self.seen_items = set()
-        self.seen_lock = threading.Lock()
+        self.seen_lock = threading.RLock()  # 改进：使用RLock
         
         # 停止管理
         self.stop_flag = False
-        self.stop_lock = threading.Lock()
+        self.stop_lock = threading.RLock()  # 改进：使用RLock
         
         # 代理管理 - 使用共享代理系统
         if enable_proxy:
@@ -90,30 +91,53 @@ class MultiThreadBaseCrawler:
             return False
     
     def _get_thread_session(self):
-        """获取线程专用会话和代理"""
+        """获取线程专用会话和代理（线程安全版本）"""
         thread_id = threading.current_thread().ident
         
-        if thread_id not in self.thread_sessions:
-            # 创建新的会话
-            import requests
-            session = requests.Session()
-            
-            # 设置共享代理
-            if self.enable_proxy:
-                shared_proxy = get_shared_proxy()
-                if shared_proxy:
-                    session.proxies.update(shared_proxy)
-                    logger.info(f"线程 {threading.current_thread().name} 使用共享代理")
-                else:
-                    logger.warning(f"线程 {threading.current_thread().name} 无法获取共享代理")
-            
-            # 创建线程锁
-            lock = threading.Lock()
-            
-            self.thread_sessions[thread_id] = session
-            self.thread_locks[thread_id] = lock
+        # 使用线程资源锁确保原子操作
+        with self.thread_resources_lock:
+            if thread_id not in self.thread_sessions:
+                self._create_thread_session(thread_id)
         
         return self.thread_sessions[thread_id], self.thread_locks[thread_id]
+    
+    def _create_thread_session(self, thread_id):
+        """创建线程专用会话（内部方法）"""
+        import requests
+        session = requests.Session()
+        
+        # 设置共享代理
+        if self.enable_proxy:
+            shared_proxy = get_shared_proxy()
+            if shared_proxy:
+                session.proxies.update(shared_proxy)
+                logger.info(f"线程 {threading.current_thread().name} 使用共享代理")
+            else:
+                logger.warning(f"线程 {threading.current_thread().name} 无法获取共享代理")
+        
+        # 创建线程锁
+        lock = threading.Lock()
+        
+        self.thread_sessions[thread_id] = session
+        self.thread_locks[thread_id] = lock
+    
+    def _update_stats(self, **kwargs):
+        """
+        线程安全的统计信息更新
+        
+        Args:
+            **kwargs: 要更新的统计项（值可以是增量或直接设置值）
+        """
+        with self.stats_lock:
+            for key, value in kwargs.items():
+                if key in self.stats:
+                    current_value = self.stats[key]
+                    if isinstance(value, (int, float)) and isinstance(current_value, (int, float)):
+                        # 增量更新
+                        self.stats[key] = current_value + value
+                    else:
+                        # 直接设置
+                        self.stats[key] = value
     
     def _rotate_thread_proxy(self) -> bool:
         """轮换线程代理 - 使用共享代理系统"""
@@ -128,10 +152,11 @@ class MultiThreadBaseCrawler:
             new_proxy = get_shared_proxy()
             if new_proxy:
                 thread_id = threading.current_thread().ident
-                if thread_id in self.thread_sessions:
-                    self.thread_sessions[thread_id].proxies.update(new_proxy)
-                    logger.info(f"线程 {threading.current_thread().name} 已轮换共享代理")
-                    return True
+                with self.thread_resources_lock:
+                    if thread_id in self.thread_sessions:
+                        self.thread_sessions[thread_id].proxies.update(new_proxy)
+                        logger.info(f"线程 {threading.current_thread().name} 已轮换共享代理")
+                        return True
             else:
                 logger.warning(f"线程 {threading.current_thread().name} 无法获取新代理")
                 return False
@@ -163,9 +188,8 @@ class MultiThreadBaseCrawler:
         thread_id = threading.current_thread().ident
         task_id = task_data.get('task_id', 'unknown')
         
-        # 更新活跃线程数
-        with self.stats_lock:
-            self.stats['active_threads'] += 1
+        # 更新活跃线程数（改进：使用辅助方法）
+        self._update_stats(active_threads=1)
         
         try:
             logger.info(f"线程 {thread_name} 开始处理任务: {task_id}")
@@ -185,12 +209,13 @@ class MultiThreadBaseCrawler:
             # 执行具体的爬取任务（由子类实现）
             results = self._execute_task(task_data, session, lock, callback)
             
-            # 更新统计
-            with self.stats_lock:
-                self.stats['completed_tasks'] += 1
-                self.stats['total_crawled'] += len(results)
-                self.stats['total_saved'] += len(results)
-                self.stats['active_threads'] -= 1
+            # 更新统计（改进：使用辅助方法确保原子性）
+            self._update_stats(
+                completed_tasks=1,
+                total_crawled=len(results),
+                total_saved=len(results),
+                active_threads=-1
+            )
             
             logger.info(f"线程 {thread_name} 完成任务，获取 {len(results)} 条数据")
             if callback:
@@ -205,10 +230,11 @@ class MultiThreadBaseCrawler:
             if self._rotate_thread_proxy():
                 logger.info(f"线程 {thread_name} 已轮换代理，可重试")
             
-            # 更新失败统计
-            with self.stats_lock:
-                self.stats['failed_tasks'] += 1
-                self.stats['active_threads'] -= 1
+            # 更新失败统计（改进：使用辅助方法）
+            self._update_stats(
+                failed_tasks=1,
+                active_threads=-1
+            )
             
             # 记录错误
             self.error_queue.put((task_id, str(e)))

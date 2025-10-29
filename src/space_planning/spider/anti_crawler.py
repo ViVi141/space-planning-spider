@@ -31,6 +31,9 @@ class AntiCrawlerManager:
         self.session = requests.Session()
         self.lock = threading.Lock()
         
+        # 初始化代理设置（如果启用）
+        self._init_proxy()
+        
         # 配置SSL - 安全优先
         self.session.verify = certifi.where()
         
@@ -54,8 +57,30 @@ class AntiCrawlerManager:
         self.max_retries = 2
         self.retry_delay = 2
     
+    def _init_proxy(self):
+        """初始化代理设置"""
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
+            if is_global_proxy_enabled():
+                proxy_dict = get_shared_proxy()
+                if proxy_dict:
+                    self.session.proxies.update(proxy_dict)
+                    print(f"AntiCrawlerManager: 已设置代理: {proxy_dict}")
+        except Exception as e:
+            print(f"AntiCrawlerManager: 初始化代理失败: {e}")
+    
     def make_request(self, url, method='GET', **kwargs):
-        """发起请求"""
+        """发起请求（支持代理）"""
+        # 更新代理（每次请求前检查是否有新代理）
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
+            if is_global_proxy_enabled():
+                proxy_dict = get_shared_proxy()
+                if proxy_dict:
+                    self.session.proxies.update(proxy_dict)
+        except Exception:
+            pass  # 代理获取失败时继续使用当前代理或无代理
+        
         ssl_strategies = [
             {'verify': True},
             {'verify': self.session.verify, 'cert': None}
@@ -79,9 +104,23 @@ class AntiCrawlerManager:
                         continue
                     
                     response = self.session.request(method, url, **request_kwargs)
+                    
+                    # 报告代理使用结果
+                    try:
+                        from .proxy_pool import report_shared_proxy_result
+                        report_shared_proxy_result(response.status_code == 200)
+                    except:
+                        pass
+                    
                     return response
                 except Exception as e:
                     last_exception = e
+                    # 报告代理失败
+                    try:
+                        from .proxy_pool import report_shared_proxy_result
+                        report_shared_proxy_result(False)
+                    except:
+                        pass
                     time.sleep(self.retry_delay)
         raise Exception(f"请求失败: {url}") 
     

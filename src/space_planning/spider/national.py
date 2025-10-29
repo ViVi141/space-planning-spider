@@ -57,6 +57,40 @@ class NationalSpider:
             'X-KL-SaaS-Ajax-Request': 'Ajax_Request',
             'X-Requested-With': 'XMLHttpRequest'
         }
+    
+    def _ensure_proxy_initialized(self):
+        """确保代理系统已初始化（在每次请求前调用）"""
+        try:
+            from .proxy_pool import initialize_proxy_pool, is_global_proxy_enabled, get_proxy_stats
+            import os
+            
+            # 检查代理状态
+            if not is_global_proxy_enabled():
+                return False
+            
+            # 检查代理池是否已初始化
+            try:
+                stats = get_proxy_stats()
+                if stats and stats.get('running', False):
+                    # 代理池已运行
+                    return True
+            except:
+                pass
+            
+            # 初始化代理池
+            config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
+            if os.path.exists(config_file):
+                if initialize_proxy_pool(config_file):
+                    print("NationalSpider: 代理池已初始化")
+                    return True
+                else:
+                    print("NationalSpider: 代理池初始化失败（可能配置未启用）")
+            else:
+                print(f"NationalSpider: 代理配置文件不存在: {config_file}")
+        except Exception as e:
+            print(f"NationalSpider: 代理初始化失败: {e}")
+        
+        return False
 
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
         """
@@ -114,6 +148,9 @@ class NationalSpider:
                 callback(f"正在检索第 {page_no} 页...")
             
             try:
+                # 确保代理已初始化（在每次请求前检查）
+                self._ensure_proxy_initialized()
+                
                 # 检查请求频率限制
                 # self.rate_limiter.wait_if_needed() # Removed as per edit hint
                 
@@ -131,7 +168,7 @@ class NationalSpider:
                 headers = self.special_headers.copy()
                 headers.update(self.anti_crawler.get_random_headers())
                 
-                # 使用防反爬虫管理器发送请求
+                # 使用防反爬虫管理器发送请求（已集成代理支持）
                 try:
                     resp = self.anti_crawler.make_request(
                         self.api_url, 

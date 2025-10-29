@@ -105,12 +105,27 @@ class SmartRequestManager:
         # 初始化会话
         self._initialize_session()
         self.retry_strategy = RetryStrategy()
+        
+        # 初始化代理
+        self._init_proxy()
     
     def _initialize_session(self):
         """初始化会话"""
         # 设置默认请求头
         headers = self._get_basic_headers()
         self.session.headers.update(headers)
+    
+    def _init_proxy(self):
+        """初始化代理设置"""
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
+            if is_global_proxy_enabled():
+                proxy_dict = get_shared_proxy()
+                if proxy_dict:
+                    self.session.proxies.update(proxy_dict)
+                    self.logger.info(f"SmartRequestManager: 已设置代理")
+        except Exception as e:
+            self.logger.debug(f"SmartRequestManager: 初始化代理失败（可能未配置）: {e}")
     
     def _get_basic_headers(self) -> Dict[str, str]:
         """获取基础请求头"""
@@ -216,7 +231,17 @@ class SmartRequestManager:
         }
     
     def _send_request_with_retry(self, request_params: Dict) -> requests.Response:
-        """发送请求并重试（无代理池）"""
+        """发送请求并重试（支持代理）"""
+        # 更新代理（每次请求前检查）
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
+            if is_global_proxy_enabled():
+                proxy_dict = get_shared_proxy()
+                if proxy_dict:
+                    self.session.proxies.update(proxy_dict)
+        except Exception:
+            pass  # 代理获取失败时继续使用当前代理或无代理
+        
         max_retries = crawler_config.get_config('retry_settings.max_retries')
         retry_delay = crawler_config.get_config('retry_settings.retry_delay')
         

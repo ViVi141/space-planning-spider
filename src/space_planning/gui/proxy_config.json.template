@@ -1,9 +1,10 @@
 {
   "enabled": false,
-  "secret_id": "ougxxofjt2jl521h2xn8",
-  "secret_key": "123xx2z34zzstv9r5yc2m5zfg1heqy2f",
+  "secret_id": "",
+  "secret_key": "",
   "username": "",
   "password": "",
   "max_proxies": 10,
   "check_interval": 300
 }
+

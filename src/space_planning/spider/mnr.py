@@ -29,6 +29,7 @@ class MNRSpider:
         self.monitor = CrawlerMonitor()
         self.anti_crawler = AntiCrawlerManager()
         
+        # 先定义headers
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'application/json, text/javascript, */*; q=0.01',
@@ -38,6 +39,11 @@ class MNRSpider:
         }
         self.max_pages = 999999  # 最大翻页数（无上限）
         self.channel_id = '216640'  # 政府信息公开平台的频道ID
+        
+        # 创建会话用于代理支持
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        self._init_proxy()
         
         # 分类配置 - 更新为新的政府信息公开平台分类
         self.categories = {
@@ -52,22 +58,60 @@ class MNRSpider:
             '地质勘查': {'code': '1326', 'name': '地质勘查'},
             '矿产勘查': {'code': '1327', 'name': '矿产勘查'},
             '矿产保护': {'code': '1328', 'name': '矿产保护'},
-            '海洋预警监测': {'code': '1329', 'name': '海洋预警监测'},
-            '海域海岛管理': {'code': '1330', 'name': '海域海岛管理'},
-            '海洋预警': {'code': '1331', 'name': '海洋预警'},
-            '海洋经济': {'code': '1664', 'name': '海洋经济'},
-            '国家测绘': {'code': '1332', 'name': '国家测绘'},
-            '地理信息管理': {'code': '1333', 'name': '地理信息管理'},
-            '自然资源督察': {'code': '1334', 'name': '自然资源督察'},
-            '法规': {'code': '1335', 'name': '法规'},
-            '测绘管理': {'code': '1336', 'name': '测绘管理'},
-            '财务管理': {'code': '1337', 'name': '财务管理'},
-            '人事管理': {'code': '1662', 'name': '人事管理'},
+            '矿产开发': {'code': '1329', 'name': '矿产开发'},
+            '地质环境保护': {'code': '1330', 'name': '地质环境保护'},
+            '海洋资源': {'code': '1331', 'name': '海洋资源'},
+            '测绘地理信息': {'code': '1332', 'name': '测绘地理信息'},
+            '国土空间用途管制': {'code': '1333', 'name': '国土空间用途管制'},
+            '地质灾害防治': {'code': '1334', 'name': '地质灾害防治'},
+            '地质公园': {'code': '1335', 'name': '地质公园'},
+            '地质遗迹保护': {'code': '1336', 'name': '地质遗迹保护'},
             '矿业权评估': {'code': '1338', 'name': '矿业权评估'},
             '机构建设': {'code': '1339', 'name': '机构建设'},
             '综合管理': {'code': '1340', 'name': '综合管理'},
             '其他': {'code': '1341', 'name': '其他'}
         }
+    
+    def _init_proxy(self):
+        """初始化代理设置"""
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
+            if is_global_proxy_enabled():
+                proxy_dict = get_shared_proxy()
+                if proxy_dict:
+                    self.session.proxies.update(proxy_dict)
+                    print(f"MNRSpider: 已设置代理: {proxy_dict}")
+        except Exception as e:
+            print(f"MNRSpider: 初始化代理失败: {e}")
+    
+    def _update_proxy(self):
+        """更新代理（每次请求前调用）"""
+        try:
+            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled, initialize_proxy_pool
+            import os
+            
+            # 确保代理启用
+            if not is_global_proxy_enabled():
+                return
+            
+            # 确保代理池已初始化
+            try:
+                from .proxy_pool import get_proxy_stats
+                stats = get_proxy_stats()
+                if not (stats and stats.get('running', False)):
+                    # 代理池未运行，初始化
+                    config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
+                    if os.path.exists(config_file):
+                        initialize_proxy_pool(config_file)
+            except:
+                pass
+            
+            # 获取最新代理
+            proxy_dict = get_shared_proxy()
+            if proxy_dict:
+                self.session.proxies.update(proxy_dict)
+        except Exception:
+            pass  # 代理获取失败时继续使用当前代理或无代理
 
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
                       speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, 
@@ -161,7 +205,10 @@ class MNRSpider:
                 
                 # 发送搜索请求
                 try:
-                    resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=15)
+                    # 更新代理（每次请求前）
+                    self._update_proxy()
+                    # 使用会话发送请求（支持代理）
+                    resp = self.session.get(self.search_api, params=params, headers=self.headers, timeout=15)
                     
                     if resp.status_code == 200:
                         self.monitor.record_request(self.search_api, success=True)
@@ -467,7 +514,10 @@ class MNRSpider:
     def get_policy_detail(self, url):
         """获取政策详情页正文"""
         try:
-            resp = requests.get(url, headers=self.headers, timeout=15)
+            # 更新代理
+            self._update_proxy()
+            # 使用会话发送请求（支持代理）
+            resp = self.session.get(url, headers=self.headers, timeout=15)
             self.monitor.record_request(url, success=True)
             resp.encoding = resp.apparent_encoding
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -522,7 +572,10 @@ class MNRSpider:
                 'perpage': 5
             }
             
-            resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=10)
+            # 更新代理
+            self._update_proxy()
+            # 使用会话发送请求（支持代理）
+            resp = self.session.get(self.search_api, params=params, headers=self.headers, timeout=10)
             
             if callback:
                 callback(f"API测试状态码: {resp.status_code}")

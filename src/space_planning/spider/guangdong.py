@@ -95,29 +95,34 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # ✅ 添加代理支持 - 使用共享代理系统
         if self.enable_proxy:
             try:
-                # 检查是否有共享代理函数
-                if hasattr(self, 'get_shared_proxy'):
-                    proxy_dict = self.get_shared_proxy()
-                else:
-                    # 使用传统的代理管理器
-                    from .proxy_pool import get_shared_proxy
-                    proxy_dict = get_shared_proxy()
+                # 确保代理池已初始化
+                from .proxy_pool import initialize_proxy_pool, get_shared_proxy, is_global_proxy_enabled
+                import os
+                
+                # 初始化代理池（如果还未初始化）
+                if is_global_proxy_enabled():
+                    config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
+                    if os.path.exists(config_file):
+                        initialize_proxy_pool(config_file)
+                
+                # 获取共享代理
+                proxy_dict = get_shared_proxy()
                 
                 if proxy_dict:
                     self.session.proxies.update(proxy_dict)
-                    print(f"会话已设置代理: {proxy_dict}")
+                    print(f"GuangdongSpider: 会话已设置代理: {proxy_dict}")
                     # 记录当前代理信息
                     if isinstance(proxy_dict, dict) and 'http' in proxy_dict:
                         proxy_url = proxy_dict['http']
                         if proxy_url.startswith('http://'):
                             proxy_info = proxy_url[7:]  # 移除 'http://' 前缀
-                            print(f"当前代理: {proxy_info}")
+                            print(f"GuangdongSpider: 当前代理: {proxy_info}")
                 else:
-                    print("警告: 启用代理但无法获取有效代理，将使用直接连接")
+                    print("GuangdongSpider: 警告: 启用代理但无法获取有效代理，将使用直接连接")
             except Exception as e:
-                print(f"代理设置失败: {e}，将使用直接连接")
+                print(f"GuangdongSpider: 代理设置失败: {e}，将使用直接连接")
         else:
-            print("代理已禁用，使用直接连接")
+            print("GuangdongSpider: 代理已禁用，使用直接连接")
         
         # 访问首页获取必要的Cookie
         try:
@@ -136,12 +141,19 @@ class GuangdongSpider(EnhancedBaseCrawler):
             print(f"访问首页异常: {e}")
     
     def _rotate_session(self):
-        """轮换会话，避免访问限制"""
+        """轮换会话，避免访问限制（保持代理设置）"""
         print("轮换会话，避免访问限制...")
+        
+        # 保存当前代理设置
+        current_proxies = getattr(self.session, 'proxies', {})
         
         # 创建新的会话
         new_session = requests.Session()
         new_session.headers.update(self.headers)
+        
+        # 恢复代理设置
+        if current_proxies:
+            new_session.proxies.update(current_proxies)
         
         # 生成新的JSESSIONID
         import random
@@ -153,7 +165,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         try:
             resp = new_session.get(self.base_url, timeout=10)
             if resp.status_code == 200:
-                print("成功轮换会话")
+                print("成功轮换会话（代理已保持）")
                 self.session = new_session
                 return True
             else:
