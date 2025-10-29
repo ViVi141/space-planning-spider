@@ -133,6 +133,7 @@ def cleanup_old_backups():
 
 def clear_database():
     """清理数据库 - 删除所有政策数据"""
+    conn = None
     try:
         conn = get_conn()
         c = conn.cursor()
@@ -156,16 +157,19 @@ def clear_database():
         
         # 提交更改
         conn.commit()
-        conn.close()
         
         print(f"数据库清理完成，删除了 {policy_count} 条政策数据")
         return True, policy_count
     except Exception as e:
         print(f"数据库清理失败: {e}")
-        if conn:
-            conn.rollback()
-            conn.close()
         return False, 0
+    finally:
+        if conn:
+            try:
+                conn.rollback()
+                conn.close()
+            except Exception as close_error:
+                print(f"关闭数据库连接失败: {close_error}")
 
 def should_backup_database():
     """检查是否需要备份数据库"""

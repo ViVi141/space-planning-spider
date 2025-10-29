@@ -11,7 +11,7 @@ import json
 # 应用配置
 APP_CONFIG = {
     'app_name': '空间规划政策爬虫系统',
-    'app_version': '3.0.0',
+    'app_version': '3.0.1',
     'install_mode': True,  # 是否使用安装模式
     'data_dir_name': '空间规划政策爬虫系统',  # 数据目录名称
 }
@@ -108,8 +108,10 @@ class AppConfig:
                 # 打包后的环境
                 app_data_dir = os.path.join(os.path.dirname(sys.executable), 'data')
             else:
-                # 开发环境
-                app_data_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'data')
+                # 开发环境 - 使用更安全的方式获取项目根目录
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                project_root = os.path.dirname(os.path.dirname(current_dir))
+                app_data_dir = os.path.join(project_root, 'data')
         
         # 确保目录存在
         os.makedirs(app_data_dir, exist_ok=True)

@@ -110,7 +110,8 @@ class DataExporter:
         try:
             import pandas as pd  # type: ignore
         except ImportError:
-            print("需要安装pandas和openpyxl库才能导出Excel文件")
+            print("❌ 缺少依赖库: pandas")
+            print("💡 解决方案: pip install pandas openpyxl")
             return False
         
         try:

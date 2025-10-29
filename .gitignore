@@ -210,4 +210,11 @@ docs/_build/
 
 # 缓存文件
 .cache/
-cache/ 
+cache/
+
+# 爬虫临时进度文件
+src/space_planning/spider/crawl_progress_*.json
+*.json.bak
+
+# PyInstaller spec文件（临时生成）
+space_planning_spider*.spec 

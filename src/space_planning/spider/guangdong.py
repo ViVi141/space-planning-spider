@@ -173,7 +173,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             else:
                 print("会话轮换失败，等待后重试...")
                 import time
-                time.sleep(30)  # 等待30秒
+                time.sleep(self.config.get('session_rotation_delay', 30))  # 等待配置的延时
                 return self._rotate_session()
         return False
     
@@ -2201,27 +2201,45 @@ class GuangdongSpider(EnhancedBaseCrawler):
                         delay = random.uniform(*delay_range)
                         time.sleep(delay)
                         
-                except Exception as e:
-                    print(f"请求失败: {e}")
-                    import traceback
-                    print(f"详细错误信息: {traceback.format_exc()}")
-                    self.monitor.record_request(self.search_url, success=False, error_type=str(e))
+                except requests.exceptions.Timeout as e:
+                    print(f"请求超时: {e}")
+                    self.monitor.record_request(self.search_url, success=False, error_type="timeout")
+                    if callback:
+                        callback(f"请求超时，等待3秒后重试...")
+                    time.sleep(3)
+                    continue
                     
-                    # 如果是网络相关错误，尝试重试
-                    if "timeout" in str(e).lower() or "connection" in str(e).lower():
-                        print(f"检测到网络错误，等待3秒后重试...")
-                        if callback:
-                            callback(f"网络错误，等待重试...")
-                        time.sleep(3)
-                        continue
+                except requests.exceptions.ConnectionError as e:
+                    print(f"连接错误: {e}")
+                    self.monitor.record_request(self.search_url, success=False, error_type="connection_error")
+                    if callback:
+                        callback(f"连接错误，等待3秒后重试...")
+                    time.sleep(3)
+                    continue
+                    
+                except requests.exceptions.HTTPError as e:
+                    error_code = getattr(e.response, 'status_code', None)
+                    print(f"HTTP错误 {error_code}: {e}")
+                    self.monitor.record_request(self.search_url, success=False, error_type=f"http_{error_code}")
                     
                     # 如果是反爬虫相关错误，增加延时
-                    if "403" in str(e) or "429" in str(e) or "block" in str(e).lower():
+                    if error_code in [403, 429]:
                         print(f"检测到反爬虫限制，等待5秒后重试...")
                         if callback:
                             callback(f"检测到访问限制，等待重试...")
                         time.sleep(5)
                         continue
+                    else:
+                        # 其他HTTP错误，直接退出
+                        break
+                        
+                except Exception as e:
+                    print(f"未知错误: {e}")
+                    import traceback
+                    print(f"详细错误信息: {traceback.format_exc()}")
+                    self.monitor.record_request(self.search_url, success=False, error_type="unknown")
+                    # 未知错误，退出循环
+                    break
                     
                     # 其他错误，记录并继续
                     print(f"未知错误，跳过当前页面")

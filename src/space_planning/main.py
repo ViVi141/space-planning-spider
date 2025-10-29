@@ -7,6 +7,12 @@
 import os
 import sys
 
+# 将src目录添加到Python路径，以便正确导入模块
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
 # 自动设置Qt平台插件路径
 def setup_qt_environment():
     """设置Qt环境变量，解决平台插件问题"""

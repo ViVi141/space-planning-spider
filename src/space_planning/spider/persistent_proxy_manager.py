@@ -488,8 +488,8 @@ class PersistentProxyManager:
             try:
                 if self.lock.locked():
                     self.lock.release()
-            except:
-                pass
+            except Exception as lock_error:
+                logger.error(f"释放锁时出错: {lock_error}")
     
     def reset_proxy_state(self):
         """重置代理状态（清空代理并删除状态文件）"""

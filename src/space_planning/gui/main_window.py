@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
         self.max_display_rows = 100  # 最大显示100行
         self.page_size = 50  # 每页50行
         self.current_page = 0  # 当前页码
-        self.setWindowTitle("空间规划政策合规性分析系统 v2.2.0 - ViVi141")
+        self.setWindowTitle("空间规划政策合规性分析系统 v3.0.1 - ViVi141")
         
         # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(__file__), "../../../docs/icon.ico")
@@ -867,8 +867,8 @@ class MainWindow(QMainWindow):
             if self.stats_label is not None:
                 self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
             
-            # 强制刷新界面
-            QApplication.processEvents()
+            # 批量更新界面，减少频繁刷新
+            self._update_ui_periodically()
             
         except Exception as e:
             print(f"保存新政策失败: {e}")
@@ -881,7 +881,8 @@ class MainWindow(QMainWindow):
                 if self.stats_label is not None:
                     self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
                 
-                QApplication.processEvents()
+                # 减少界面刷新频率
+                self._update_ui_periodically()
             except Exception as e2:
                 print(f"显示新政策失败: {e2}")
 
@@ -1438,7 +1439,8 @@ class MainWindow(QMainWindow):
             return
         
         # 获取项目关键词
-        project_keywords = self.keyword_edit.text().strip().split() if self.keyword_edit.text().strip() else []
+        text = self.keyword_edit.text().strip()
+        project_keywords = text.split() if text else []
         if not project_keywords:
             QMessageBox.information(self, "提示", "请先输入项目关键词，然后进行合规性分析")
             return
@@ -1820,17 +1822,19 @@ class MainWindow(QMainWindow):
         """显示关于对话框"""
         QMessageBox.about(self, "关于", 
             "空间规划政策合规性分析系统\n\n"
-            "版本: 2.2.0\n"
-            "更新时间: 2025.7.10\n"
+            "版本: 3.0.1\n"
+            "更新时间: 2025.10.29\n"
             "功能: 智能爬取、合规分析、数据导出\n"
             "技术: Python + PyQt5 + SQLite\n\n"
             "开发者: ViVi141\n"
             "联系邮箱: 747384120@qq.com\n\n"
             "本次更新:\n"
-            "• 修复广东省爬虫分类显示问题\n"
-            "• 优化政策类型字段显示逻辑\n"
-            "• 完善数据传递机制\n"
-            "• 移除授权限制，完全开放使用\n\n"
+            "• 修复模块导入路径问题，确保程序能正确启动\n"
+            "• 修复数据库连接泄漏问题，提升稳定性\n"
+            "• 修复线程锁泄漏问题，改进异常处理\n"
+            "• 修复全局变量线程安全问题\n"
+            "• 优化代码质量和性能\n"
+            "• 清理临时文件，保持项目整洁\n\n"
             "防反爬虫功能已启用，包含:\n"
             "• 随机User-Agent轮换\n"
             "• 请求频率限制\n"
@@ -1906,6 +1910,22 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             QMessageBox.warning(self, "错误", f"代理诊断失败: {str(e)}")
+    
+    def _update_ui_periodically(self):
+        """定期更新UI，减少频繁刷新"""
+        # 使用定时器来批量更新UI，而不是每次都立即刷新
+        if not hasattr(self, '_ui_update_timer'):
+            self._ui_update_timer = QTimer()
+            self._ui_update_timer.timeout.connect(self._force_ui_update)
+            self._ui_update_timer.setSingleShot(True)
+        
+        # 如果定时器还没开始，启动它
+        if not self._ui_update_timer.isActive():
+            self._ui_update_timer.start(100)  # 100ms后更新UI
+    
+    def _force_ui_update(self):
+        """强制更新UI"""
+        QApplication.processEvents()
     
     def clear_proxy_manually(self):
         """手动清空代理"""

@@ -770,10 +770,10 @@ def get_shared_proxy() -> Optional[Dict[str, str]]:
     """获取共享代理 - 所有爬虫使用同一个代理直到失效"""
     global _global_current_proxy, _global_proxy_fail_count
     
-    if not _global_proxy_enabled:
-        return None
-    
     with _global_proxy_lock:
+        if not _global_proxy_enabled:
+            return None
+        
         # 如果当前代理失败次数过多，切换新代理
         if _global_proxy_fail_count >= _global_max_fail_count:
             _global_current_proxy = None
