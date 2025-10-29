@@ -1066,17 +1066,12 @@ class MainWindow(QMainWindow):
         source_item.setToolTip(f"点击查看来源：{source}")
         self.table.setItem(row, 3, source_item)
         
-        # 政策类型列
-        if level == '广东省人民政府':
-            # 广东省政策显示分类信息
-            if category and category.strip():
-                type_item = QTableWidgetItem(category)
-            else:
-                # 如果分类为空，使用智能分类
-                policy_types = self.compliance_analyzer.classify_policy(title, content)
-                type_item = QTableWidgetItem(", ".join(policy_types))
+        # 政策类型列 - 优先显示实际分类
+        if category and category.strip():
+            # 使用实际的分类信息
+            type_item = QTableWidgetItem(category)
         else:
-            # 其他政策使用智能分类
+            # 如果分类为空，使用智能分类作为备选
             policy_types = self.compliance_analyzer.classify_policy(title, content)
             type_item = QTableWidgetItem(", ".join(policy_types))
         
@@ -1147,7 +1142,11 @@ class MainWindow(QMainWindow):
             "Excel表格 (*.xlsx)", 
             "文本文件 (*.txt)",
             "Markdown文档 (*.md)",
-            "RAG知识库 (*.md/*.json/*.txt)"
+            "RAG知识库 (*.md/*.json/*.txt)",
+            "--- 分条导出 ---",
+            "分条导出Word文档 (每个政策一个文件)",
+            "分条导出文本文件 (每个政策一个文件)",
+            "分条导出Markdown (每个政策一个文件)"
         ])
         format_layout.addWidget(format_combo)
         format_group.setLayout(format_layout)
@@ -1185,6 +1184,43 @@ class MainWindow(QMainWindow):
             selected_policies = [self.current_data[i] for i in selected_indices]
             
             # 根据选择的格式设置文件过滤器
+            if "分条导出" in selected_format:
+                # 分条导出需要选择目录
+                from PyQt5.QtWidgets import QFileDialog
+                output_dir = QFileDialog.getExistingDirectory(self, "选择输出目录", "")
+                if not output_dir:
+                    return
+                
+                # 确定分条导出格式
+                if "Word" in selected_format:
+                    export_format = 'word'
+                elif "文本" in selected_format:
+                    export_format = 'txt'
+                elif "Markdown" in selected_format:
+                    export_format = 'markdown'
+                else:
+                    export_format = 'word'
+                
+                # 执行分条导出
+                try:
+                    from space_planning.utils.export import DataExporter
+                    exporter = DataExporter()
+                    result = exporter.export_individual_files(selected_policies, output_dir, export_format)
+                    
+                    if result.get('success'):
+                        QMessageBox.information(self, "成功", 
+                            f"分条导出成功！\n共导出{result['total_files']}个文件\n输出目录：{output_dir}")
+                    else:
+                        QMessageBox.critical(self, "错误", f"分条导出失败：{result.get('error', '未知错误')}")
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"分条导出失败：{str(e)}")
+                return
+            elif "RAG知识库" in selected_format:
+                # RAG导出需要选择目录，不是单个文件
+                self.export_rag_knowledge_base(selected_policies)
+                return
+            
+            # 常规导出需要选择文件
             if "Word" in selected_format:
                 file_filter = "Word文档 (*.docx)"
                 default_ext = ".docx"
@@ -1197,10 +1233,6 @@ class MainWindow(QMainWindow):
             elif "Markdown" in selected_format:
                 file_filter = "Markdown文档 (*.md)"
                 default_ext = ".md"
-            elif "RAG知识库" in selected_format:
-                # RAG导出需要选择目录，不是单个文件
-                self.export_rag_knowledge_base(selected_policies)
-                return
             else:
                 file_filter = "所有文件 (*.*)"
                 default_ext = ""

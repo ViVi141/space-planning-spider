@@ -105,193 +105,206 @@ class MNRSpider:
         seen_titles = set()
         seen_links = set()
         
-        # 遍历每个分类进行搜索
-        for category_name in categories_to_search:
+        # 由于服务器不支持分类搜索，只搜索一次，不分分类遍历
+        # 构建搜索关键词
+        search_keywords = []
+        if keywords:
+            search_keywords.extend(keywords)
+        
+        search_word = ' '.join(search_keywords) if search_keywords else ''
+        
+        if callback:
+            callback(f"搜索关键词: {search_word or '(无关键词，搜索全部政策)'}")
+        
+        # 分页获取数据 - 重置所有计数变量
+        page = 1
+        category_results = []
+        consecutive_empty_pages = 0  # 连续空页计数
+        max_consecutive_empty = 3  # 最大连续空页数
+        new_policies_count = 0  # 新增政策计数
+        consecutive_filtered_pages = 0  # 连续过滤页计数（有数据但都被过滤）
+        max_consecutive_filtered = 3  # 最大连续过滤页数
+        
+        while page <= self.max_pages:
             if stop_callback and stop_callback():
                 break
                 
-            category_config = self.categories[category_name]
-            
             if callback:
-                callback(f"正在搜索分类: {category_name}")
+                callback(f"正在抓取第{page}页...")
             
-            # 构建搜索关键词
-            search_keywords = []
-            if keywords:
-                search_keywords.extend(keywords)
-            
-            search_word = ' '.join(search_keywords) if search_keywords else ''
-            
-            if callback:
-                callback(f"分类[{category_name}]搜索关键词: {search_word}")
-            
-            # 分页获取数据
-            page = 1
-            category_results = []
-            consecutive_empty_pages = 0  # 连续空页计数
-            max_consecutive_empty = 3  # 最大连续空页数
-            
-            while page <= self.max_pages:
-                if stop_callback and stop_callback():
-                    break
+            try:
+                # 构建搜索参数
+                # 注意：根据实际情况，可能服务器不支持themecat语法，暂时不使用分类搜索
+                if search_word:
+                    search_query = search_word
+                else:
+                    search_query = ""
                     
-                if callback:
-                    callback(f"分类[{category_name}]正在抓取第{page}页...")
-                    
+                params = {
+                    'channelid': self.channel_id,
+                    'searchword': search_query,
+                    'page': page,
+                    'perpage': 20,  # 每页20条
+                    'searchtype': 'title',  # 搜索标题
+                    'orderby': 'RELEVANCE'  # 按相关性排序
+                }
+                
+                # 调试信息：显示搜索参数
+                if callback and page == 1:
+                    callback(f"搜索参数: {search_query or '(搜索全部)'}")
+                
+                # 添加时间过滤
+                if start_date:
+                    params['starttime'] = start_date
+                if end_date:
+                    params['endtime'] = end_date
+                
+                # 发送搜索请求
                 try:
-                    # 构建搜索参数 - 先尝试简单搜索
-                    if search_word:
-                        search_query = search_word
+                    resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=15)
+                    
+                    if resp.status_code == 200:
+                        self.monitor.record_request(self.search_api, success=True)
                     else:
-                        search_query = ""
-                    
-                    # 暂时不使用分类代码，先测试基本搜索功能
-                    # if category_name and category_name in self.categories:
-                    #     category_code = self.categories[category_name]['code']
-                    #     search_query = f"themecat=({category_code})"
-                    #     if search_word:
-                    #         search_query += f" and (TITLE/10=like('{search_word}') or SEARCHCONTENT/1=like('{search_word}'))"
-                    
-                    params = {
-                        'channelid': self.channel_id,
-                        'searchword': search_query,
-                        'page': page,
-                        'perpage': 20,  # 每页20条
-                        'searchtype': 'title',  # 搜索标题
-                        'orderby': 'RELEVANCE'  # 按相关性排序
-                    }
-                    
-                    # 添加时间过滤
-                    if start_date:
-                        params['starttime'] = start_date
-                    if end_date:
-                        params['endtime'] = end_date
-                    
-                    # 发送搜索请求
-                    try:
-                        resp = requests.get(self.search_api, params=params, headers=self.headers, timeout=15)
-                        
-                        if resp.status_code == 200:
-                            self.monitor.record_request(self.search_api, success=True)
-                        else:
-                            self.monitor.record_request(self.search_api, success=False, error_type=f"HTTP {resp.status_code}")
-                            if callback:
-                                callback(f"分类[{category_name}]第{page}页搜索失败: {resp.status_code}")
-                            break
-                    except Exception as e:
-                        self.monitor.record_request(self.search_api, success=False, error_type=str(e))
+                        self.monitor.record_request(self.search_api, success=False, error_type=f"HTTP {resp.status_code}")
                         if callback:
-                            callback(f"分类[{category_name}]第{page}页搜索异常: {str(e)}")
+                            callback(f"第{page}页搜索失败: {resp.status_code}")
                         break
-                    
-                    # 解析搜索结果
-                    try:
-                        search_data = resp.json()
-                    except json.JSONDecodeError:
-                        # 如果不是JSON，尝试解析HTML
-                        soup = BeautifulSoup(resp.text, 'html.parser')
-                        page_policies = self._parse_html_results(soup, callback, category_name)
-                    else:
-                        page_policies = self._parse_json_results(search_data, callback)
-                    
-                    if not page_policies:
-                        consecutive_empty_pages += 1
-                        if callback:
-                            callback(f"分类[{category_name}]第{page}页无数据")
-                        
-                        if consecutive_empty_pages >= max_consecutive_empty:
-                            if callback:
-                                callback(f"分类[{category_name}]连续{max_consecutive_empty}页无数据，停止爬取")
-                        break
-                        page += 1
-                        continue
-                    else:
-                        consecutive_empty_pages = 0  # 重置连续空页计数
-                    
-                    # 过滤和验证数据
-                    filtered_policies = []
-                    new_policies_count = 0  # 新增政策计数
-                    
-                    for policy in page_policies:
-                        # 去重检查
-                        title = policy.get('title', '')
-                        link = policy.get('link', '')
-                        
-                        # 使用标题和链接的组合作为唯一标识
-                        unique_id = f"{title}|{link}"
-                        
-                        if unique_id in seen_titles:
-                            if callback:
-                                callback(f"跳过重复政策: {title}")
-                            continue
-                        
-                        # 时间过滤 - 只有当日期解析成功时才进行过滤
-                        pub_date_fmt = self._parse_date(policy.get('pub_date', ''))
-                        time_filtered = False
-                        if pub_date_fmt:
-                            if dt_start and pub_date_fmt < dt_start:
-                                time_filtered = True
-                            if dt_end and pub_date_fmt > dt_end:
-                                time_filtered = True
-                        # 如果日期解析失败，不进行时间过滤，避免误删数据
-                        
-                        if time_filtered:
-                            continue
-                        
-                        # 关键词过滤
-                        if keywords and not any(kw in title for kw in keywords):
-                            continue
-                        
-                        # 设置分类信息
-                        policy['category'] = category_name
-                        
-                        # 获取详情页内容
-                        if link:
-                            content = self.get_policy_detail(link)
-                            policy['content'] = content
-                        
-                        # 添加到已见集合
-                        seen_titles.add(unique_id)
-                        seen_links.add(link)
-                        
-                        filtered_policies.append(policy)
-                        new_policies_count += 1
-                        
-                        # 发送政策数据信号（包含正文）
-                        if callback:
-                            callback(f"POLICY_DATA:{policy['title']}|{policy['pub_date']}|{policy['link']}|{policy['content']}|{category_name}")
-                    
-                    category_results.extend(filtered_policies)
-                    
-                    if callback:
-                        callback(f"分类[{category_name}]第{page}页获取{len(filtered_policies)}条政策（新增{new_policies_count}条）")
-                    
-                    # 如果连续多页没有新增政策，可能已经到达数据末尾
-                    if new_policies_count == 0:
-                        consecutive_empty_pages += 1
-                        if consecutive_empty_pages >= max_consecutive_empty:
-                            if callback:
-                                callback(f"分类[{category_name}]连续{max_consecutive_empty}页无新增政策，停止爬取")
-                            break
-                    else:
-                        consecutive_empty_pages = 0
-                    
-                    # 控制速度
-                    if not disable_speed_limit:
-                        time.sleep(random.uniform(1, 2))
-                    
-                    page += 1
-                    
                 except Exception as e:
+                    self.monitor.record_request(self.search_api, success=False, error_type=str(e))
                     if callback:
-                        callback(f"分类[{category_name}]第{page}页抓取失败: {e}")
+                        callback(f"第{page}页搜索异常: {str(e)}")
                     break
-            
-            # 将当前分类的结果添加到总结果中
-            results.extend(category_results)
-            
-            if callback:
-                callback(f"分类[{category_name}]爬取完成，获取{len(category_results)}条政策")
+                
+                # 解析搜索结果
+                try:
+                    search_data = resp.json()
+                except json.JSONDecodeError:
+                    # 如果不是JSON，尝试解析HTML
+                    soup = BeautifulSoup(resp.text, 'html.parser')
+                    page_policies = self._parse_html_results(soup, callback, '全部')
+                else:
+                    page_policies = self._parse_json_results(search_data, callback)
+                    
+                if not page_policies:
+                    consecutive_empty_pages += 1
+                    if callback:
+                        callback(f"第{page}页无数据")
+                    
+                    if consecutive_empty_pages >= max_consecutive_empty:
+                        if callback:
+                            callback(f"连续{max_consecutive_empty}页无数据，停止爬取")
+                        break
+                    page += 1
+                    continue
+                else:
+                    consecutive_empty_pages = 0  # 重置连续空页计数
+                
+                # 过滤和验证数据
+                filtered_policies = []
+                new_policies_count = 0  # 新增政策计数
+                
+                for policy in page_policies:
+                    # 去重检查
+                    title = policy.get('title', '')
+                    link = policy.get('link', '')
+                    
+                    # 使用标题和链接的组合作为唯一标识
+                    unique_id = f"{title}|{link}"
+                    
+                    if unique_id in seen_titles:
+                        if callback:
+                            callback(f"跳过重复政策: {title}")
+                        continue
+                    
+                    # 时间过滤 - 只有当日期解析成功时才进行过滤
+                    pub_date_fmt = self._parse_date(policy.get('pub_date', ''))
+                    time_filtered = False
+                    if pub_date_fmt:
+                        if dt_start and pub_date_fmt < dt_start:
+                            time_filtered = True
+                        if dt_end and pub_date_fmt > dt_end:
+                            time_filtered = True
+                    # 如果日期解析失败，不进行时间过滤，避免误删数据
+                    
+                    if time_filtered:
+                        continue
+                    
+                    # 关键词过滤
+                    if keywords and not any(kw in title for kw in keywords):
+                        continue
+                    
+                    # 保存原始分类信息（如果存在），用于检测分类不匹配
+                    original_category = policy.get('category', '')
+                    
+                    # 设置分类信息（使用原标题的原始分类）
+                    policy['category'] = original_category if original_category else '未分类'
+                    policy['original_category'] = original_category  # 保存原始分类用于调试
+                    
+                    # 获取详情页内容
+                    if link:
+                        content = self.get_policy_detail(link)
+                        policy['content'] = content
+                    
+                    # 添加到已见集合
+                    seen_titles.add(unique_id)
+                    seen_links.add(link)
+                    
+                    filtered_policies.append(policy)
+                    new_policies_count += 1
+                    
+                    # 发送政策数据信号（包含正文）
+                    if callback:
+                        callback(f"POLICY_DATA:{policy['title']}|{policy['pub_date']}|{policy['link']}|{policy['content']}|{policy['category']}")
+                    
+                category_results.extend(filtered_policies)
+                
+                if callback:
+                    callback(f"第{page}页获取{len(filtered_policies)}条政策（新增{new_policies_count}条）")
+                
+                # 如果连续多页没有新增政策，可能已经到达数据末尾
+                # 注意：这里不应该重复计数consecutive_empty_pages
+                # 因为上面已经处理了空页情况
+                if new_policies_count == 0 and len(page_policies) > 0:
+                    # 这种情况表示所有数据都被过滤掉了，但不是真正的空页
+                    # 可能是分类不匹配、时间过滤、关键词过滤等原因
+                    consecutive_filtered_pages += 1
+                    
+                    if consecutive_filtered_pages >= max_consecutive_filtered:
+                        # 连续多页所有数据都被过滤，很可能是分类不匹配或搜索参数有问题
+                        # 避免无限翻页的假象
+                        if callback:
+                            callback(f"连续{consecutive_filtered_pages}页所有数据被过滤（找到数据但全部被过滤），已无相关数据，停止爬取")
+                        break
+                    else:
+                        # 还可以继续尝试
+                        if callback:
+                            callback(f"第{page}页所有数据被过滤（连续{consecutive_filtered_pages}页），继续下一页")
+                elif new_policies_count > 0:
+                    # 有新增数据，重置过滤页计数
+                    consecutive_filtered_pages = 0
+                elif new_policies_count == 0 and len(page_policies) == 0:
+                    # 这种情况已经在上面处理过了，不应该再次计数
+                    pass
+                else:
+                    consecutive_empty_pages = 0
+                
+                # 控制速度
+                if not disable_speed_limit:
+                    time.sleep(random.uniform(1, 2))
+                
+                page += 1
+                
+            except Exception as e:
+                if callback:
+                    callback(f"第{page}页抓取失败: {e}")
+                break
+        
+        # 将结果添加到总结果中
+        results.extend(category_results)
+        
+        if callback:
+            callback(f"爬取完成，获取{len(category_results)}条政策")
         
         if callback:
             callback(f"全部爬取完成，共获取{len(results)}条政策")

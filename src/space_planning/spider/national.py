@@ -236,28 +236,30 @@ class NationalSpider:
                 total_processed += len(page_policies)
                 policies.extend(page_policies)
                 
-                # 时间区间状态检查
+                # 时间区间状态检查 - 优化版本
                 if dt_start and dt_end and page_dates:
-                    min_date = min(page_dates)
-                    max_date = max(page_dates)
+                    # 更精确的时间区间判断
+                    if not in_target_range:
+                        # 检查是否有任何数据在目标时间范围内
+                        has_target_data = any(dt_start <= d <= dt_end for d in page_dates)
+                        if has_target_data:
+                            in_target_range = True
+                            consecutive_out_of_range = 0
+                            print(f"第 {page_no} 页：进入目标时间区间 [{start_date} - {end_date}]")
                     
-                    # 检查是否进入目标时间区间
-                    if not in_target_range and min_date <= dt_end and max_date >= dt_start:
-                        in_target_range = True
-                        consecutive_out_of_range = 0
-                        print(f"第 {page_no} 页：进入目标时间区间 [{start_date} - {end_date}]")
-                    
-                    # 检查是否完全脱离目标时间区间
-                    elif in_target_range and (max_date < dt_start or min_date > dt_end):
-                        consecutive_out_of_range += 1
-                        print(f"第 {page_no} 页：脱离目标时间区间，连续 {consecutive_out_of_range} 页")
-                        
-                        # 如果连续多页都脱离范围，停止检索
-                        if consecutive_out_of_range >= max_consecutive_out_of_range:
-                            print(f"连续 {max_consecutive_out_of_range} 页脱离目标时间区间，停止检索")
-                            return policies
-                    else:
-                        consecutive_out_of_range = 0
+                    elif in_target_range:
+                        # 检查是否所有数据都在目标范围外
+                        all_out_of_range = all(d < dt_start or d > dt_end for d in page_dates)
+                        if all_out_of_range:
+                            consecutive_out_of_range += 1
+                            print(f"第 {page_no} 页：脱离目标时间区间，连续 {consecutive_out_of_range} 页")
+                            
+                            # 如果连续多页都脱离范围，停止检索
+                            if consecutive_out_of_range >= max_consecutive_out_of_range:
+                                print(f"连续 {max_consecutive_out_of_range} 页脱离目标时间区间，停止检索")
+                                return policies
+                        else:
+                            consecutive_out_of_range = 0
                 
                 # 更新进度
                 if page_policies:
@@ -275,7 +277,23 @@ class NationalSpider:
                 print(f"错误详情: {traceback.format_exc()}")
                 if callback:
                     callback(f"检索第 {page_no} 页时出错: {e}")
-                break
+                
+                # 根据错误类型决定是否继续
+                error_str = str(e).lower()
+                if any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'dns']):
+                    # 网络相关错误，可以重试
+                    print(f"网络错误，尝试继续下一页...")
+                    page_no += 1
+                    continue
+                elif any(keyword in error_str for keyword in ['json', 'parse', 'decode']):
+                    # 解析错误，可能是服务器返回了错误页面
+                    print(f"解析错误，尝试继续下一页...")
+                    page_no += 1
+                    continue
+                else:
+                    # 其他错误，停止爬取
+                    print(f"遇到严重错误，停止爬取")
+                    break
         
         print(f"爬取完成，共获取 {len(policies)} 条政策")
         if callback:

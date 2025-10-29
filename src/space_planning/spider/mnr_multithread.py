@@ -178,16 +178,12 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                 if callback:
                     callback(f"线程 {thread_name} 分类[{category_name}]正在抓取第{page}页...")
                 
-                # 构建搜索参数 - 先尝试简单搜索
+                # 构建搜索参数
+                # 注意：根据实际情况，可能服务器不支持themecat语法，暂时不使用分类搜索
                 if search_word:
                     search_query = search_word
                 else:
                     search_query = ""
-                
-                # 暂时不使用分类代码，先测试基本搜索功能
-                # if category_name and category_name in self.categories:
-                #     category_code = self.categories[category_name]['code']
-                #     search_query = f"themecat=({category_code})"
                 
                 params = {
                     'channelid': self.channel_id,
@@ -197,6 +193,10 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                     'searchtype': 'title',  # 搜索标题
                     'orderby': 'RELEVANCE'  # 按相关性排序
                 }
+                
+                # 调试信息：显示搜索参数
+                if callback:
+                    callback(f"线程 {thread_name} 分类[{category_name}]搜索参数: {search_query}")
                 
                 # 使用线程专用会话发送请求
                 with lock:

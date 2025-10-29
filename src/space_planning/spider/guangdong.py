@@ -195,13 +195,29 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     check_resp, check_info = self.post_page(check_url, headers=check_headers)
                     if check_resp and check_resp.status_code == 200:
                         self.monitor.record_request(check_url, success=True)
+                        print(f"翻页校验成功: {check_resp.status_code}")
                     else:
                         self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code if check_resp else 'No response'}")
-                    print(f"翻页校验响应状态码: {check_resp.status_code if check_resp else 'No response'}")
+                        print(f"翻页校验失败: {check_resp.status_code if check_resp else 'No response'}")
+                        # 如果校验失败，等待后重试整个流程
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            print(f"翻页校验失败，重试整个流程...")
+                            time.sleep(3)
+                            continue
+                        else:
+                            print(f"翻页校验达到最大重试次数，尝试跳过校验直接请求数据")
                 except Exception as check_error:
                     self.monitor.record_request(check_url, success=False, error_type=str(check_error))
-                    print(f"翻页校验请求失败: {check_error}")
-                    # 翻页校验失败不影响主请求，继续执行
+                    print(f"翻页校验请求异常: {check_error}")
+                    # 校验异常时，等待后重试
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        print(f"翻页校验异常，重试整个流程...")
+                        time.sleep(3)
+                        continue
+                    else:
+                        print(f"翻页校验异常达到最大重试次数，尝试跳过校验直接请求数据")
                 
                 # 2. 再请求数据接口
                 search_url = "https://gd.pkulaw.com/china/search/RecordSearch"

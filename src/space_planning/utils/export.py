@@ -4,12 +4,27 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 import os
 import logging
+import re
+from datetime import datetime
 
 # 导入RAG导出模块
 from .rag_export import RAGExporter, export_for_rag_knowledge_base
 
 # 设置日志
 logger = logging.getLogger(__name__)
+
+def sanitize_filename(filename):
+    """清理文件名，移除不合法字符"""
+    # 移除Windows不支持的字符
+    illegal_chars = r'<>:"/\|?*'
+    for char in illegal_chars:
+        filename = filename.replace(char, '_')
+    # 移除连续空格
+    filename = re.sub(r'\s+', '_', filename)
+    # 限制文件名长度
+    if len(filename) > 200:
+        filename = filename[:200]
+    return filename
 
 def export_to_word(data, file_path):
     """导出政策数据到Word文档"""
@@ -363,5 +378,132 @@ class DataExporter:
                 'success': False,
                 'error': str(e)
             }
+    
+    def export_individual_files(self, data, output_dir, format_type='word'):
+        """
+        分条导出 - 一个政策一个文件，所有文件直接放在指定目录
+        
+        Args:
+            data: 政策数据列表
+            output_dir: 输出目录
+            format_type: 输出格式 ('word', 'txt', 'markdown')
+        
+        Returns:
+            Dict: 导出结果信息
+        """
+        try:
+            # 创建输出目录
+            os.makedirs(output_dir, exist_ok=True)
+            
+            exported_files = []
+            total_files = 0
+            
+            # 直接在该目录下导出所有文件
+            for i, policy in enumerate(data, 1):
+                # 解析政策数据
+                if isinstance(policy, dict):
+                    pub_date = policy.get('pub_date', '未知日期')
+                    title = policy.get('title', '未知标题')
+                    level = policy.get('level', '未知层级')
+                    source = policy.get('source', '未知来源')
+                    content = policy.get('content', '无内容')
+                elif isinstance(policy, (list, tuple)):
+                    pub_date = str(policy[3]) if len(policy) > 3 else "未知日期"
+                    title = str(policy[2]) if len(policy) > 2 else "未知标题"
+                    level = str(policy[1]) if len(policy) > 1 else "未知层级"
+                    source = str(policy[4]) if len(policy) > 4 else "未知来源"
+                    content = str(policy[5]) if len(policy) > 5 else "无内容"
+                else:
+                    pub_date = title = level = source = content = "未知"
+                
+                policy_data = {
+                    'title': title,
+                    'level': level,
+                    'pub_date': pub_date,
+                    'source': source,
+                    'content': content
+                }
+                
+                # 生成文件名
+                safe_title = sanitize_filename(title)
+                file_index = f"{i:04d}"  # 4位数字序号
+                filename = f"{file_index}_{safe_title}"
+                
+                # 根据格式类型生成文件
+                if format_type == 'word':
+                    filepath = os.path.join(output_dir, f"{filename}.docx")
+                    self._export_single_word(policy_data, filepath)
+                elif format_type == 'txt':
+                    filepath = os.path.join(output_dir, f"{filename}.txt")
+                    self._export_single_txt(policy_data, filepath)
+                elif format_type == 'markdown':
+                    filepath = os.path.join(output_dir, f"{filename}.md")
+                    self._export_single_markdown(policy_data, filepath)
+                else:
+                    continue
+                
+                exported_files.append(filepath)
+                total_files += 1
+            
+            return {
+                'success': True,
+                'total_files': total_files,
+                'files': exported_files,
+                'output_dir': output_dir
+            }
+            
+        except Exception as e:
+            logger.error(f"分条导出失败: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'total_files': 0,
+                'files': []
+            }
+    
+    def _export_single_word(self, policy, filepath):
+        """导出单个政策为Word文档"""
+        doc = Document()
+        
+        # 添加标题
+        title = doc.add_heading(policy['title'], 0)
+        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        
+        # 添加基本信息
+        info_para = doc.add_paragraph()
+        info_para.add_run(f'发布机构：{policy["level"]}\n')
+        info_para.add_run(f'发布日期：{policy["pub_date"]}\n')
+        info_para.add_run(f'来源：{policy["source"]}\n')
+        
+        # 添加正文
+        doc.add_paragraph('正文：')
+        content_para = doc.add_paragraph(policy['content'])
+        
+        # 保存文档
+        doc.save(filepath)
+    
+    def _export_single_txt(self, policy, filepath):
+        """导出单个政策为文本文件"""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"{policy['title']}\n")
+            f.write('=' * 80 + '\n\n')
+            f.write(f"发布机构：{policy['level']}\n")
+            f.write(f"发布日期：{policy['pub_date']}\n")
+            f.write(f"来源：{policy['source']}\n\n")
+            f.write('-' * 80 + '\n\n')
+            f.write("正文：\n")
+            f.write(policy['content'])
+    
+    def _export_single_markdown(self, policy, filepath):
+        """导出单个政策为Markdown文档"""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(f"# {policy['title']}\n\n")
+            f.write("---\n\n")
+            f.write(f"**发布机构：** {policy['level']}\n\n")
+            f.write(f"**发布日期：** {policy['pub_date']}\n\n")
+            f.write(f"**来源：** {policy['source']}\n\n")
+            f.write("---\n\n")
+            f.write("## 正文\n\n")
+            f.write(policy['content'])
     
     # PDF导出功能已移除 
