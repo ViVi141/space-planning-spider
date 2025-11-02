@@ -9,6 +9,9 @@ from enum import Enum
 from typing import Dict, Any, Optional
 import json
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AntiDetectionMode(Enum):
     """防检测模式"""
@@ -100,7 +103,7 @@ class CrawlerConfig:
         else:
             self.current_config = self.enhanced_config.copy()
         
-        print(f"已切换到{mode.value}模式")
+        logger.info(f"已切换到{mode.value}模式")
     
     def get_mode(self) -> AntiDetectionMode:
         """获取当前模式"""
@@ -145,19 +148,19 @@ class CrawlerConfig:
         self.set_config('proxy_settings.enabled', True)
         if api_url:
             self.set_config('proxy_settings.api_url', api_url)
-        print("代理功能已启用")
+        logger.info("代理功能已启用")
     
     def disable_proxy(self) -> None:
         """禁用代理"""
         self.set_config('proxy_settings.enabled', False)
         self.set_config('proxy_settings.api_url', None)
-        print("代理功能已禁用")
+        logger.info("代理功能已禁用")
     
     def set_request_delay(self, min_delay: float, max_delay: float) -> None:
         """设置请求延迟"""
         self.set_config('request_delay.min', min_delay)
         self.set_config('request_delay.max', max_delay)
-        print(f"请求延迟已设置为 {min_delay}-{max_delay} 秒")
+        logger.info(f"请求延迟已设置为 {min_delay}-{max_delay} 秒")
     
     def set_retry_settings(self, max_retries: int, retry_delay: int) -> None:
         """设置重试参数"""

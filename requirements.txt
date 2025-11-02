@@ -1,15 +1,15 @@
 # 空间规划政策爬虫与合规性分析系统
-# 版本：v3.0.0
-# 更新时间：2025.7.13
-# 依赖包列表
+# 版本：v3.0.1
+# 更新时间：2025.10.29
+# 依赖包列表（已锁定版本以确保稳定性）
 
-PyQt5
-requests
-beautifulsoup4
-python-docx
-fuzzywuzzy
-python-Levenshtein
-lxml
-pandas
-openpyxl 
-kdl>=0.2.21 
+PyQt5>=5.15.0,<6.0.0
+requests>=2.28.0,<3.0.0
+beautifulsoup4>=4.11.0,<5.0.0
+python-docx>=0.8.11,<1.0.0
+fuzzywuzzy>=0.18.0,<1.0.0
+python-Levenshtein>=0.12.0,<1.0.0
+lxml>=4.9.0,<5.0.0
+pandas>=1.5.0,<3.0.0
+openpyxl>=3.0.10,<4.0.0
+kdl>=0.2.21,<1.0.0 

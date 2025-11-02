@@ -1,5 +1,68 @@
 # 更新日志 (CHANGELOG)
 
+## [3.0.2] - 2025-11-02
+
+### ⚠️ 重要说明
+- **爬虫状态监控功能暂时不可用**：当前版本中，在爬虫执行时打开"爬虫状态"对话框可能导致程序崩溃。建议在爬虫未运行时查看状态信息，或等待后续版本修复。
+
+### ✅ 修复问题
+- **修复代理认证问题**
+  - 改进快代理私密代理的认证处理逻辑，明确区分API认证和代理连接认证
+  - 明确SecretId/SecretKey仅用于API调用，不能作为代理连接的认证信息
+  - 在407错误时提供详细的IP白名单设置指导
+  - 支持通过IP白名单或用户名密码进行代理认证
+
+- **修复guangdong.py中的time变量冲突**
+  - 移除所有函数内部的`import time`语句（共10处）
+  - 统一使用文件顶部导入的`time`模块
+  - 修复`UnboundLocalError: cannot access local variable 'time'`错误
+
+- **增强爬虫状态对话框错误处理**
+  - 添加`is_closing`标记，在关闭过程中停止所有更新
+  - 改进异常捕获机制，避免崩溃
+  - 统一使用`_safe_get_status()`方法获取状态
+  - 在main_window.py中添加对话框创建异常处理
+
+### 🔧 技术改进
+- **代理管理优化**
+  - 改进`PersistentProxyManager`的认证处理逻辑
+  - 添加公网IP检测功能，方便设置IP白名单
+  - 提供详细的错误提示和解决建议
+
+- **代码结构优化**
+  - 修复代码缩进错误
+  - 改进错误处理机制
+  - 清理重复代码
+
+### 📝 代码变更
+- `src/space_planning/spider/persistent_proxy_manager.py`
+  - 改进代理认证逻辑，移除错误的SecretId/SecretKey作为认证信息的尝试
+  - 添加IP白名单设置指导
+  - 增强407错误的错误提示
+
+- `src/space_planning/spider/guangdong.py`
+  - 移除所有函数内部的`import time`语句
+  - 统一使用模块级别的`time`导入
+
+- `src/space_planning/gui/crawler_status_dialog.py`
+  - 添加`is_closing`标记和异常处理
+  - 统一使用`_safe_get_status()`方法
+  - 改进对话框关闭逻辑
+
+- `src/space_planning/gui/main_window.py`
+  - 添加对话框创建异常处理
+  - 防止崩溃传播
+
+### 📋 已知问题
+- **爬虫状态监控功能**：在爬虫执行时打开状态对话框可能导致程序崩溃，建议在爬虫未运行时使用或等待后续版本修复
+
+### 🔄 向后兼容性
+- 完全向后兼容v3.0.1版本
+- 保持现有数据库结构不变
+- 配置文件格式无变化
+
+---
+
 ## [3.0.1] - 2025-10-29
 
 ### ✅ 修复问题

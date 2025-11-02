@@ -9,6 +9,7 @@ from datetime import datetime
 
 # 导入RAG导出模块
 from .rag_export import RAGExporter, export_for_rag_knowledge_base
+from ..core.exceptions import ExportError, DataValidationError
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -125,8 +126,8 @@ class DataExporter:
         try:
             import pandas as pd  # type: ignore
         except ImportError:
-            print("❌ 缺少依赖库: pandas")
-            print("💡 解决方案: pip install pandas openpyxl")
+            logger.error("❌ 缺少依赖库: pandas")
+            logger.info("💡 解决方案: pip install pandas openpyxl")
             return False
         
         try:
@@ -239,9 +240,12 @@ class DataExporter:
             
             wb.save(file_path)
             return True
+        except (OSError, IOError, PermissionError) as e:
+            logger.error(f"文件操作失败: {e}", exc_info=True)
+            raise ExportError(f"无法创建或写入Excel文件: {e}") from e
         except Exception as e:
-            print(f"导出Excel文件失败: {e}")
-            return False
+            logger.error(f"导出Excel文件失败: {e}", exc_info=True)
+            raise ExportError(f"导出Excel失败: {e}") from e
     
     def export_to_txt(self, data, file_path):
         """导出政策数据到文本文件"""
@@ -296,9 +300,12 @@ class DataExporter:
                     f.write('=' * 50 + '\n\n')
             
             return True
+        except (OSError, IOError, PermissionError) as e:
+            logger.error(f"文件操作失败: {e}", exc_info=True)
+            raise ExportError(f"无法创建或写入文本文件: {e}") from e
         except Exception as e:
-            print(f"导出文本文件失败: {e}")
-            return False
+            logger.error(f"导出文本文件失败: {e}", exc_info=True)
+            raise ExportError(f"导出文本文件失败: {e}") from e
     
     def export_to_markdown(self, data, file_path):
         """导出政策数据到Markdown文档"""
@@ -353,9 +360,12 @@ class DataExporter:
                     f.write('---\n\n')
             
             return True
+        except (OSError, IOError, PermissionError) as e:
+            logger.error(f"文件操作失败: {e}", exc_info=True)
+            raise ExportError(f"无法创建或写入Markdown文件: {e}") from e
         except Exception as e:
-            print(f"导出Markdown文件失败: {e}")
-            return False
+            logger.error(f"导出Markdown文件失败: {e}", exc_info=True)
+            raise ExportError(f"导出Markdown文件失败: {e}") from e
     
     def export_for_rag(self, data, output_dir, format_type='markdown', max_chunk_size=4096):
         """
@@ -372,12 +382,12 @@ class DataExporter:
         """
         try:
             return export_for_rag_knowledge_base(data, output_dir, format_type, max_chunk_size)
+        except (OSError, IOError, PermissionError) as e:
+            logger.error(f"文件操作失败: {e}", exc_info=True)
+            raise ExportError(f"无法创建或写入RAG导出文件: {e}") from e
         except Exception as e:
-            print(f"RAG导出失败: {e}")
-            return {
-                'success': False,
-                'error': str(e)
-            }
+            logger.error(f"RAG导出失败: {e}", exc_info=True)
+            raise ExportError(f"RAG导出失败: {e}") from e
     
     def export_individual_files(self, data, output_dir, format_type='word'):
         """

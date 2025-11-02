@@ -21,6 +21,9 @@ from .advanced_anti_detection import (
     ip_rotation_manager, 
     request_rate_limiter
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AntiCrawlerManager:
     """防反爬虫管理器"""
@@ -65,9 +68,9 @@ class AntiCrawlerManager:
                 proxy_dict = get_shared_proxy()
                 if proxy_dict:
                     self.session.proxies.update(proxy_dict)
-                    print(f"AntiCrawlerManager: 已设置代理: {proxy_dict}")
+                    logger.info(f"AntiCrawlerManager: 已设置代理: {proxy_dict}")
         except Exception as e:
-            print(f"AntiCrawlerManager: 初始化代理失败: {e}")
+            logger.warning(f"AntiCrawlerManager: 初始化代理失败: {e}", exc_info=True)
     
     def make_request(self, url, method='GET', **kwargs):
         """发起请求（支持代理）"""
@@ -78,8 +81,13 @@ class AntiCrawlerManager:
                 proxy_dict = get_shared_proxy()
                 if proxy_dict:
                     self.session.proxies.update(proxy_dict)
-        except Exception:
-            pass  # 代理获取失败时继续使用当前代理或无代理
+                    logger.debug(f"[代理验证] AntiCrawlerManager: 请求 {url} 使用代理: {proxy_dict}")
+                else:
+                    logger.debug(f"[代理验证] AntiCrawlerManager: 请求 {url} 未获取到代理（可能代理池未初始化）")
+            else:
+                logger.debug(f"[代理验证] AntiCrawlerManager: 全局代理已禁用，请求 {url} 不使用代理")
+        except Exception as e:
+            logger.debug(f"[代理验证] AntiCrawlerManager: 获取代理失败: {e}，继续使用当前代理或无代理")
         
         ssl_strategies = [
             {'verify': True},
@@ -100,7 +108,7 @@ class AntiCrawlerManager:
                     
                     # 确保SSL安全验证
                     if not request_kwargs.get('verify', True):
-                        print("警告: 检测到不安全的SSL配置，已跳过")
+                        logger.warning("警告: 检测到不安全的SSL配置，已跳过")
                         continue
                     
                     response = self.session.request(method, url, **request_kwargs)

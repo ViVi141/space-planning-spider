@@ -515,4 +515,4 @@ def show_rag_export_dialog(parent, data):
         对话框结果
     """
     dialog = RAGExportDialog(parent, data)
-    return dialog.exec_() 
+    return dialog.exec() 

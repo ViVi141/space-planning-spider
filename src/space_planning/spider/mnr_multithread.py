@@ -21,6 +21,7 @@ import requests
 from .multithread_base_crawler import MultiThreadBaseCrawler
 from .monitor import CrawlerMonitor
 from .anti_crawler import AntiCrawlerManager
+from .spider_config import SpiderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,25 +32,19 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
     def __init__(self, max_workers=4, enable_proxy=True):
         super().__init__(max_workers, enable_proxy)
         
-        # 自然资源部特定配置（与原始爬虫一致）
-        self.base_url = 'https://gi.mnr.gov.cn/'
-        self.search_api = 'https://search.mnr.gov.cn/was5/web/search'
-        self.ajax_api = 'https://search.mnr.gov.cn/was/ajaxdata_jsonp.jsp'
-        self.level = '自然资源部'
-        self.channel_id = '216640'  # 政府信息公开平台的频道ID
+        # 从配置获取参数
+        config = SpiderConfig.get_mnr_config()
+        
+        self.base_url = config['base_url']
+        self.search_api = config['search_api']
+        self.ajax_api = config['ajax_api']
+        self.level = config['level']
+        self.channel_id = config['channel_id']
+        self.headers = config['headers'].copy()
         
         # 初始化防反爬虫管理器
         self.anti_crawler = AntiCrawlerManager()
         self.monitor = CrawlerMonitor()
-        
-        # 设置请求头（与原始爬虫一致）
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Referer': 'https://gi.mnr.gov.cn/',
-            'X-Requested-With': 'XMLHttpRequest'
-        }
         
         # 分类配置 - 更新为新的政府信息公开平台分类
         self.categories = {
@@ -137,9 +132,21 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
         
         policies = []
         page = 1
-        max_pages = 100  # 限制每个分类的最大页数
+        
+        # 从通用配置获取参数
+        common_config = SpiderConfig.get_common_config()
+        max_pages = getattr(self, 'max_pages', 100)  # 限制每个分类的最大页数
+        max_consecutive_empty = common_config['max_empty_pages']
         consecutive_empty_pages = 0
-        max_consecutive_empty = 3
+        
+        # 从任务数据或实例属性获取关键词
+        keywords = getattr(self, 'keywords', None) or task_data.get('keywords', None)
+        if keywords and isinstance(keywords, list):
+            search_word = ' '.join(keywords)
+        elif keywords and isinstance(keywords, str):
+            search_word = keywords
+        else:
+            search_word = ""
         
         # 设置速度模式
         speed_mode = getattr(self, 'speed_mode', '正常速度')
@@ -180,10 +187,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                 
                 # 构建搜索参数
                 # 注意：根据实际情况，可能服务器不支持themecat语法，暂时不使用分类搜索
-                if search_word:
-                    search_query = search_word
-                else:
-                    search_query = ""
+                search_query = search_word
                 
                 params = {
                     'channelid': self.channel_id,
@@ -565,6 +569,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                       category=None):
         """兼容原有接口的多线程爬取方法"""
         self.speed_mode = speed_mode
+        self.keywords = keywords  # 保存关键词供_execute_task使用
         
         # 如果指定了分类，过滤任务
         if category and category in self.categories:
@@ -589,6 +594,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                                   category=None):
         """多线程爬取政策（兼容广东省爬虫接口）"""
         self.speed_mode = speed_mode
+        self.keywords = keywords  # 保存关键词供_execute_task使用
         
         # 如果指定了分类，过滤任务
         if category and category in self.categories:

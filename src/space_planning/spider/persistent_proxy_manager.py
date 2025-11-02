@@ -16,11 +16,20 @@ from datetime import datetime, timedelta
 try:
     from kdl.auth import Auth
     from kdl.client import Client
+    try:
+        from kdl.exceptions import KdlStatusError
+    except ImportError:
+        # 如果导入失败，尝试其他可能的位置
+        try:
+            from kdl import KdlStatusError
+        except ImportError:
+            KdlStatusError = Exception  # 回退到通用异常
     KDL_AVAILABLE = True
 except ImportError:
     KDL_AVAILABLE = False
     Auth = None
     Client = None
+    KdlStatusError = Exception
 import requests
 
 logger = logging.getLogger(__name__)
@@ -115,40 +124,36 @@ class PersistentProxyInfo:
         # 构建代理字典
         proxy_str = f"{self.ip}:{self.port}"
         
-        # 检查是否需要认证 - 从配置文件读取
+        # 检查是否需要认证 - 从配置文件读取（支持加密配置）
+        username = ''
+        password = ''
         try:
             config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
             if os.path.exists(config_file):
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                username = config.get('username', '')
-                password = config.get('password', '')
-            else:
-                username = ''
-                password = ''
+                # 优先使用SecureConfig读取（自动解密）
+                try:
+                    from ..utils.crypto import SecureConfig
+                    secure_config = SecureConfig(config_file)
+                    config = secure_config.get_all_config()
+                    username = config.get('username', '')
+                    password = config.get('password', '')
+                    logger.debug("PersistentProxyInfo: 使用SecureConfig读取认证信息（已自动解密）")
+                except Exception as secure_error:
+                    # 降级到直接读取JSON
+                    logger.debug(f"PersistentProxyInfo: SecureConfig不可用，使用直接读取: {secure_error}")
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    username = config.get('username', '')
+                    password = config.get('password', '')
         except Exception as e:
             logger.warning(f"读取代理配置文件失败: {e}")
-            username = ''
-            password = ''
         
         # 保存认证信息
         self.username = username
         self.password = password
         
-        if username and password:
-            # 带认证的代理格式
-            self.proxy_dict = {
-                'http': f'http://{username}:{password}@{proxy_str}',
-                'https': f'http://{username}:{password}@{proxy_str}'
-            }
-            logger.info(f"使用带认证的代理: {username}@{proxy_str}")
-        else:
-            # 无认证的代理格式
-            self.proxy_dict = {
-                'http': f'http://{proxy_str}',
-                'https': f'http://{proxy_str}'
-            }
-            logger.info(f"使用无认证的代理: {proxy_str}")
+        # 构建代理字典（根据是否有认证信息）
+        self._build_proxy_dict()
         
         # 代理状态跟踪
         self.created_at = datetime.now()
@@ -166,6 +171,28 @@ class PersistentProxyInfo:
         self.max_age_hours = 24     # 最大使用时间24小时
         
         logger.info(f"创建持久化代理: {proxy_str}")
+    
+    def _build_proxy_dict(self):
+        """构建代理字典（根据认证信息）"""
+        proxy_str = f"{self.ip}:{self.port}"
+        
+        if self.username and self.password:
+            # 带认证的代理格式
+            self.proxy_dict = {
+                'http': f'http://{self.username}:{self.password}@{proxy_str}',
+                'https': f'http://{self.username}:{self.password}@{proxy_str}'
+            }
+            logger.info(f"使用带认证的代理: {self.username}@{proxy_str}")
+        else:
+            # 无认证的代理格式
+            self.proxy_dict = {
+                'http': f'http://{proxy_str}',
+                'https': f'http://{proxy_str}'
+            }
+            logger.info(f"使用无认证的代理: {proxy_str}")
+            # 如果无认证信息，记录提示（可能使用IP白名单，这是正常的）
+            # 只有在真正出现407错误时才会记录错误提示
+            logger.debug(f"代理 {proxy_str} 未配置认证信息（可能使用IP白名单认证）")
     
     def mark_used(self, success: bool = True, response_time: Optional[float] = None):
         """标记代理使用结果"""
@@ -241,8 +268,11 @@ class PersistentProxyInfo:
         obj = cls(proxy_data, data.get('proxy_type', 'api'))
         
         # 恢复认证信息
-        obj.username = data.get('username')
-        obj.password = data.get('password')
+        obj.username = data.get('username', '')
+        obj.password = data.get('password', '')
+        
+        # 重新构建proxy_dict以包含认证信息
+        obj._build_proxy_dict()
         
         # 恢复状态
         obj.created_at = datetime.fromisoformat(data['created_at'])
@@ -294,7 +324,7 @@ class PersistentProxyManager:
         logger.info("持久化代理管理器初始化完成")
     
     def _load_config(self, config_file: Optional[str] = None) -> Dict:
-        """加载配置文件"""
+        """加载配置文件（支持加密配置）"""
         if config_file is None:
             config_file = os.path.join(
                 os.path.dirname(__file__), '..', 'gui', 'proxy_config.json'
@@ -311,15 +341,63 @@ class PersistentProxyManager:
         
         if os.path.exists(config_file):
             try:
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    # 合并配置
-                    for key, value in default_config.items():
-                        if key not in config:
-                            config[key] = value
-                    return config
+                # 尝试使用SecureConfig读取（自动解密敏感信息）
+                try:
+                    from ..utils.crypto import SecureConfig
+                    secure_config = SecureConfig(config_file)
+                    config = secure_config.get_all_config()
+                    logger.debug("使用SecureConfig读取配置（已自动解密敏感信息）")
+                except Exception as secure_error:
+                    # 如果SecureConfig不可用，降级到直接读取JSON
+                    logger.debug(f"SecureConfig不可用，使用直接读取: {secure_error}")
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                
+                # 合并配置
+                for key, value in default_config.items():
+                    if key not in config:
+                        config[key] = value
+                
+                # 验证配置是否正确（检查是否是加密值）
+                secret_id = config.get('secret_id', '')
+                secret_key = config.get('secret_key', '')
+                
+                # 如果secret_id或secret_key看起来像base64编码的加密值（长度>30且包含特殊字符）
+                # 说明没有正确解密，尝试手动解密
+                if secret_id and len(secret_id) > 30 and ('=' in secret_id or '/' in secret_id or '+' in secret_id):
+                    try:
+                        from ..utils.crypto import SecureConfig
+                        secure_config = SecureConfig(config_file)
+                        config['secret_id'] = secure_config.get_sensitive('secret_id', secret_id)
+                        logger.debug("手动解密secret_id")
+                    except Exception as decrypt_error:
+                        logger.warning(f"无法解密secret_id，可能导致API错误: {decrypt_error}")
+                
+                if secret_key and len(secret_key) > 30 and ('=' in secret_key or '/' in secret_key or '+' in secret_key):
+                    try:
+                        if 'secure_config' not in locals():
+                            from ..utils.crypto import SecureConfig
+                            secure_config = SecureConfig(config_file)
+                        config['secret_key'] = secure_config.get_sensitive('secret_key', secret_key)
+                        logger.debug("手动解密secret_key")
+                    except Exception as decrypt_error:
+                        logger.warning(f"无法解密secret_key，可能导致API错误: {decrypt_error}")
+                
+                # 同样处理password字段
+                password = config.get('password', '')
+                if password and len(password) > 30 and ('=' in password or '/' in password or '+' in password):
+                    try:
+                        if 'secure_config' not in locals():
+                            from ..utils.crypto import SecureConfig
+                            secure_config = SecureConfig(config_file)
+                        config['password'] = secure_config.get_sensitive('password', password)
+                        logger.debug("手动解密password")
+                    except Exception:
+                        pass  # password可能不是加密的
+                
+                return config
             except Exception as e:
-                logger.error(f"加载代理配置失败: {e}")
+                logger.error(f"加载代理配置失败: {e}", exc_info=True)
         
         return default_config
     
@@ -332,7 +410,16 @@ class PersistentProxyManager:
                 
                 if state_data.get('current_proxy'):
                     proxy_data = state_data['current_proxy']
-                    self.current_proxy = PersistentProxyInfo.from_dict(proxy_data)
+                    # 使用from_dict方法或手动重建
+                    try:
+                        if hasattr(PersistentProxyInfo, 'from_dict'):
+                            self.current_proxy = PersistentProxyInfo.from_dict(proxy_data)
+                        else:
+                            # 手动重建代理信息对象
+                            self.current_proxy = self._reconstruct_proxy_from_dict(proxy_data)
+                    except Exception as e:
+                        logger.warning(f"重建代理对象失败: {e}")
+                        self.current_proxy = None
                     
                     # 检查代理是否仍然有效
                     if self.current_proxy.is_expired():
@@ -341,7 +428,70 @@ class PersistentProxyManager:
                     else:
                         logger.info(f"恢复上次使用的代理: {self.current_proxy.ip}:{self.current_proxy.port}")
         except Exception as e:
-            logger.error(f"加载代理状态失败: {e}")
+            logger.error(f"加载代理状态失败: {e}", exc_info=True)
+    
+    def _load_proxy_from_state(self) -> Optional[PersistentProxyInfo]:
+        """从状态文件加载代理信息（用于API失败时的回退）"""
+        try:
+            if not os.path.exists(self.state_file):
+                return None
+            
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                state_data = json.load(f)
+            
+            proxy_data = state_data.get('current_proxy')
+            if not proxy_data:
+                return None
+            
+            # 使用from_dict方法重建代理对象
+            try:
+                if hasattr(PersistentProxyInfo, 'from_dict') and isinstance(PersistentProxyInfo.from_dict, classmethod):
+                    return PersistentProxyInfo.from_dict(proxy_data)
+                else:
+                    # 手动重建
+                    if proxy_data.get('ip') and proxy_data.get('port'):
+                        proxy_info = PersistentProxyInfo({
+                            'ip': proxy_data['ip'],
+                            'port': proxy_data['port']
+                        }, proxy_data.get('proxy_type', 'api'))
+                        
+                        # 恢复统计信息
+                        if proxy_data.get('created_at'):
+                            proxy_info.created_at = datetime.fromisoformat(proxy_data['created_at'])
+                        if proxy_data.get('first_used_at'):
+                            proxy_info.first_used_at = datetime.fromisoformat(proxy_data['first_used_at'])
+                        if proxy_data.get('last_used_at'):
+                            proxy_info.last_used_at = datetime.fromisoformat(proxy_data['last_used_at'])
+                        
+                        proxy_info.use_count = proxy_data.get('use_count', 0)
+                        proxy_info.success_count = proxy_data.get('success_count', 0)
+                        proxy_info.failure_count = proxy_data.get('failure_count', 0)
+                        proxy_info.consecutive_failures = proxy_data.get('consecutive_failures', 0)
+                        proxy_info.is_active = proxy_data.get('is_active', True)
+                        
+                        # 恢复认证信息（优先从保存的数据，如果没有则从配置读取）
+                        if proxy_data.get('username'):
+                            proxy_info.username = proxy_data['username']
+                        else:
+                            # 从配置读取
+                            proxy_info.username = self.config.get('username', '')
+                        
+                        if proxy_data.get('password'):
+                            proxy_info.password = proxy_data['password']
+                        else:
+                            # 从配置读取
+                            proxy_info.password = self.config.get('password', '')
+                        
+                        # 重新构建proxy_dict以包含认证信息
+                        proxy_info._build_proxy_dict()
+                        
+                        return proxy_info
+            except Exception as e:
+                logger.debug(f"从状态文件重建代理对象失败: {e}")
+                return None
+        except Exception as e:
+            logger.debug(f"从状态文件加载代理失败: {e}")
+            return None
     
     def _save_state(self):
         """保存当前代理状态"""
@@ -358,9 +508,16 @@ class PersistentProxyManager:
             logger.error(f"保存代理状态失败: {e}")
     
     def _get_new_proxy(self) -> Optional[PersistentProxyInfo]:
-        """获取新的代理"""
+        """获取新的代理（增强错误处理和回退机制）"""
         if not self.client:
             logger.error("代理客户端未初始化")
+            # 尝试从状态文件加载已有代理
+            saved_proxy = self._load_proxy_from_state()
+            if saved_proxy and not saved_proxy.is_expired() and saved_proxy.is_active:
+                logger.info(f"客户端未初始化，使用状态文件中的代理: {saved_proxy.ip}:{saved_proxy.port}")
+                return saved_proxy
+            elif saved_proxy:
+                logger.debug(f"状态文件中的代理已过期或失效: {saved_proxy.ip}:{saved_proxy.port}")
             return None
         
         try:
@@ -375,39 +532,170 @@ class PersistentProxyManager:
                     # 处理返回的数据格式
                     if isinstance(proxy_data, list) and len(proxy_data) > 0:
                         proxy_info = PersistentProxyInfo(proxy_data[0], 'tunnel')
-                        # 设置认证信息
+                        # 设置认证信息（从配置读取，已解密）
                         proxy_info.username = self.config.get('username', '')
                         proxy_info.password = self.config.get('password', '')
+                        # 重新构建proxy_dict以包含认证信息
+                        proxy_info._build_proxy_dict()
                         return proxy_info
                     elif isinstance(proxy_data, str):
                         proxy_info = PersistentProxyInfo(proxy_data, 'tunnel')
-                        # 设置认证信息
+                        # 设置认证信息（从配置读取，已解密）
                         proxy_info.username = self.config.get('username', '')
                         proxy_info.password = self.config.get('password', '')
+                        # 重新构建proxy_dict以包含认证信息
+                        proxy_info._build_proxy_dict()
                         return proxy_info
             else:
-                # 使用API代理
+                # 使用API代理（私密代理）
                 proxy_data = self.client.get_dps(num=1)
                 if proxy_data:
+                    logger.debug(f"get_dps返回数据: {proxy_data}, 类型: {type(proxy_data)}")
+                    
+                    # 检查配置中是否有认证信息
+                    config_username = self.config.get('username', '').strip()
+                    config_password = self.config.get('password', '').strip()
+                    
+                    # 对于私密代理，认证方式有两种：
+                    # 1. IP 白名单（推荐，无需用户名密码，在快代理控制台设置）
+                    # 2. username/password 认证（需要在代理设置中配置）
+                    # 注意：SecretId/SecretKey 仅用于API调用获取代理，不能作为代理连接的认证信息
+                    
+                    # 如果配置中没有username/password，记录提示信息（但不强制要求，因为可能使用IP白名单）
+                    if not config_username and not config_password:
+                        # 尝试获取当前公网IP（用于设置白名单）
+                        public_ip = None
+                        try:
+                            from .proxy_verifier import ProxyVerifier
+                            public_ip = ProxyVerifier.get_real_ip()
+                        except Exception:
+                            try:
+                                import socket
+                                # 备用方法：获取本机IP（可能不是公网IP）
+                                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                                s.connect(("8.8.8.8", 80))
+                                local_ip = s.getsockname()[0]
+                                s.close()
+                            except Exception:
+                                local_ip = None
+                        
+                        logger.info(
+                            "未配置代理认证信息（username/password）。"
+                            "私密代理支持两种认证方式："
+                            "\n1. IP白名单（推荐）：在快代理控制台设置IP白名单，无需用户名密码"
+                        )
+                        if public_ip:
+                            logger.info(f"检测到当前公网IP: {public_ip}，请在快代理控制台将此IP添加到白名单")
+                        elif 'local_ip' in locals() and local_ip:
+                            logger.info(f"当前本机IP: {local_ip}（可能不是公网IP），请在快代理控制台将您的公网IP添加到白名单")
+                        logger.info(
+                            "\n2. 用户名/密码：在代理设置中配置username和password"
+                            "\n   如果不确定认证信息，请联系快代理客服获取"
+                        )
+                    
                     # 处理返回的数据格式
                     if isinstance(proxy_data, list) and len(proxy_data) > 0:
-                        proxy_info = PersistentProxyInfo(proxy_data[0], 'api')
-                        # 设置认证信息
-                        proxy_info.username = self.config.get('username', '')
-                        proxy_info.password = self.config.get('password', '')
+                        proxy_item = proxy_data[0]
+                        logger.debug(f"解析列表中的代理数据: {proxy_item}, 类型: {type(proxy_item)}")
+                        
+                        # 如果返回的是字典，可能包含认证信息
+                        if isinstance(proxy_item, dict):
+                            # 检查字典中是否有认证信息
+                            proxy_info = PersistentProxyInfo(proxy_item, 'api')
+                            # 优先使用返回数据中的认证信息，否则使用配置中的认证信息
+                            proxy_info.username = proxy_item.get('username', '') or config_username
+                            proxy_info.password = proxy_item.get('password', '') or config_password
+                        else:
+                            # 字符串或简单格式（私密代理通常返回 ip:port 字符串格式）
+                            proxy_info = PersistentProxyInfo(proxy_item, 'api')
+                            # 从配置读取认证信息
+                            # 注意：不使用SecretId/SecretKey作为认证，它们仅用于API调用
+                            proxy_info.username = config_username
+                            proxy_info.password = config_password
+                        
+                        # 重新构建proxy_dict以包含认证信息
+                        proxy_info._build_proxy_dict()
                         return proxy_info
                     elif isinstance(proxy_data, str):
                         proxy_info = PersistentProxyInfo(proxy_data, 'api')
-                        # 设置认证信息
-                        proxy_info.username = self.config.get('username', '')
-                        proxy_info.password = self.config.get('password', '')
+                        # 从配置读取认证信息
+                        # 注意：不使用SecretId/SecretKey作为认证，它们仅用于API调用
+                        proxy_info.username = config_username
+                        proxy_info.password = config_password
+                        # 重新构建proxy_dict以包含认证信息
+                        proxy_info._build_proxy_dict()
                         return proxy_info
             
             return None
             
         except Exception as e:
-            logger.error(f"获取新代理失败: {e}")
-            return None
+            error_msg = str(e)
+            error_type = type(e).__name__
+            
+            # 检查是否是KdlStatusError并获取状态码
+            status_code = None
+            if hasattr(e, 'status_code'):
+                status_code = e.status_code
+            elif hasattr(e, 'code'):
+                status_code = e.code
+            elif '400' in error_msg or 'Bad Request' in error_msg:
+                status_code = 400
+            
+            # 处理400错误（请求格式错误）
+            if status_code == 400 or "400" in error_msg or "Bad Request" in error_msg:
+                logger.warning("代理API返回400错误（请求格式错误）")
+                logger.info("可能原因：订单号或密钥格式不正确、API参数错误")
+                logger.info("解决方案：请检查代理设置中的订单API密钥（SecretId和SecretKey）是否正确")
+                
+                # 尝试从状态文件加载已有代理（如果有）
+                try:
+                    saved_proxy = self._load_proxy_from_state()
+                    if saved_proxy and not saved_proxy.is_expired():
+                        logger.info(f"API失败，使用状态文件中保存的代理: {saved_proxy.ip}:{saved_proxy.port}")
+                        return saved_proxy
+                    elif saved_proxy:
+                        logger.debug(f"状态文件中的代理已过期，无法使用")
+                except Exception as load_error:
+                    logger.debug(f"从状态文件加载代理失败: {load_error}")
+                
+                logger.warning("无可用缓存代理，代理获取失败")
+                return None
+            
+            # 处理401/403错误（认证失败）
+            elif status_code in (401, 403) or "401" in error_msg or "403" in error_msg:
+                logger.error("代理API认证失败，请检查订单号和密钥配置")
+                logger.info("请确认代理设置中的订单API密钥（SecretId和SecretKey）是否正确")
+                return None
+            
+            # 处理503错误（服务不可用/频率限制）
+            elif status_code == 503 or "503" in error_msg or "req over limit" in error_msg.lower():
+                logger.warning("代理API请求频率限制或服务不可用，稍后将重试")
+                # 尝试使用状态文件中的代理
+                try:
+                    saved_proxy = self._load_proxy_from_state()
+                    if saved_proxy and not saved_proxy.is_expired():
+                        logger.info(f"API限制，使用状态文件中保存的代理: {saved_proxy.ip}:{saved_proxy.port}")
+                        return saved_proxy
+                except Exception:
+                    pass
+                return None
+            
+            # 处理其他错误
+            else:
+                logger.error(f"获取新代理失败 ({error_type}): {error_msg}")
+                
+                # 尝试使用状态文件中的代理作为回退
+                try:
+                    saved_proxy = self._load_proxy_from_state()
+                    if saved_proxy and not saved_proxy.is_expired():
+                        logger.info(f"API错误，尝试使用状态文件中保存的代理: {saved_proxy.ip}:{saved_proxy.port}")
+                        return saved_proxy
+                    elif saved_proxy:
+                        logger.debug(f"状态文件中的代理已过期，无法使用")
+                except Exception as load_error:
+                    logger.debug(f"从状态文件加载代理失败: {load_error}")
+                
+                return None
     
     def get_proxy(self) -> Optional[Dict[str, str]]:
         """获取当前可用的代理"""
@@ -438,10 +726,28 @@ class PersistentProxyManager:
                 logger.info(f"获取到新代理: {new_proxy.ip}:{new_proxy.port} (类型: {new_proxy.proxy_type})")
                 return new_proxy.proxy_dict
             else:
-                logger.error("无法获取新代理")
+                # 尝试使用状态文件中的代理作为最后的手段
+                logger.warning("无法从API获取新代理，尝试使用状态文件中的代理")
+                try:
+                    saved_proxy = self._load_proxy_from_state()
+                    if saved_proxy:
+                        # 检查代理是否仍然有效（未过期且活跃）
+                        if not saved_proxy.is_expired() and saved_proxy.is_active:
+                            logger.info(f"使用状态文件中保存的代理: {saved_proxy.ip}:{saved_proxy.port}")
+                            self.current_proxy = saved_proxy
+                            self._save_state()
+                            return saved_proxy.proxy_dict
+                        else:
+                            logger.warning(f"状态文件中的代理已过期或失效: {saved_proxy.ip}:{saved_proxy.port}")
+                    else:
+                        logger.error("无法获取新代理，且状态文件中没有可用代理")
+                except Exception as e:
+                    logger.debug(f"从状态文件加载代理失败: {e}")
+                
+                logger.error("无法获取新代理，代理功能将不可用")
                 return None
     
-    def report_result(self, success: bool, response_time: Optional[float] = None):
+    def report_result(self, success: bool, response_time: Optional[float] = None, error_msg: Optional[str] = None):
         """报告代理使用结果"""
         with self.lock:
             if self.current_proxy:
@@ -451,6 +757,47 @@ class PersistentProxyManager:
                 if not success:
                     logger.warning(f"代理使用失败: {self.current_proxy.ip}:{self.current_proxy.port} "
                                  f"(连续失败: {self.current_proxy.consecutive_failures}次)")
+                    
+                    # 如果失败原因是407（代理认证失败），且没有配置认证信息，提示用户
+                    if error_msg and '407' in error_msg and ('Proxy Authentication Required' in error_msg or 'Tunnel connection failed: 407' in error_msg):
+                        if not (self.current_proxy.username and self.current_proxy.password):
+                            # 尝试获取当前公网IP（用于设置白名单）
+                            public_ip = None
+                            try:
+                                from .proxy_verifier import ProxyVerifier
+                                public_ip = ProxyVerifier.get_real_ip(proxies=None, timeout=5)
+                            except Exception:
+                                try:
+                                    import socket
+                                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                                    s.connect(("8.8.8.8", 80))
+                                    local_ip = s.getsockname()[0]
+                                    s.close()
+                                except Exception:
+                                    local_ip = None
+                            
+                            error_detail = (
+                                f"【代理认证失败】代理 {self.current_proxy.ip}:{self.current_proxy.port} 返回407错误，需要认证。"
+                                f"\n解决方法（选择其中一种）："
+                                f"\n方法1（推荐）：设置IP白名单"
+                            )
+                            if public_ip:
+                                error_detail += f"\n  ✓ 检测到当前公网IP: {public_ip}"
+                                error_detail += f"\n  - 在快代理控制台将此IP添加到白名单"
+                            elif 'local_ip' in locals() and local_ip:
+                                error_detail += f"\n  - 注意：检测到本机IP {local_ip}（可能是内网IP）"
+                                error_detail += f"\n  - 请查询您的公网IP并在快代理控制台将公网IP添加到白名单"
+                            else:
+                                error_detail += f"\n  - 请查询您的公网IP并在快代理控制台将公网IP添加到白名单"
+                            error_detail += (
+                                f"\n  - 设置白名单后，代理连接无需用户名密码"
+                                f"\n  - 白名单设置方法：登录快代理控制台 -> 订单管理 -> IP白名单设置"
+                                f"\n方法2：配置用户名密码"
+                                f"\n  - 在GUI的'代理设置'对话框中填写'用户名'和'密码'字段"
+                                f"\n  - 如果不确定用户名密码，请联系快代理客服获取"
+                                f"\n  - 注意：SecretId/SecretKey不能作为代理认证信息，它们仅用于API调用获取代理"
+                            )
+                            logger.error(error_detail)
     
     def force_refresh(self):
         """强制刷新代理"""

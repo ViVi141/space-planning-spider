@@ -425,17 +425,17 @@ class SmartRequestManager:
     def switch_mode(self, mode: AntiDetectionMode) -> None:
         """切换防检测模式"""
         crawler_config.set_mode(mode)
-        print(f"已切换到{mode.value}模式")
+        self.logger.info(f"已切换到{mode.value}模式")
     
     def print_status(self) -> None:
         """打印当前状态"""
         crawler_config.print_current_config()
-        print(f"\n请求统计:")
-        print(f"总请求数: {self.total_requests}")
-        print(f"成功请求: {self.successful_requests}")
-        print(f"失败请求: {self.failed_requests}")
+        self.logger.info(f"\n请求统计:")
+        self.logger.info(f"总请求数: {self.total_requests}")
+        self.logger.info(f"成功请求: {self.successful_requests}")
+        self.logger.info(f"失败请求: {self.failed_requests}")
         if self.total_requests > 0:
-            print(f"成功率: {self.successful_requests / self.total_requests * 100:.1f}%")
+            self.logger.info(f"成功率: {self.successful_requests / self.total_requests * 100:.1f}%")
 
 # 全局实例
 smart_request_manager = SmartRequestManager() 

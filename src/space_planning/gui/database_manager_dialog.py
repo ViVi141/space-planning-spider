@@ -15,6 +15,9 @@ from datetime import datetime
 
 from ..core import database as db
 from ..core import config
+import logging
+
+logger = logging.getLogger(__name__)
 
 class BackupThread(QThread):
     """备份线程"""
@@ -186,7 +189,7 @@ class DatabaseManagerDialog(QDialog):
         """加载备份文件列表"""
         try:
             backup_files = db.get_backup_files()
-            print(f"获取到 {len(backup_files)} 个备份文件")
+            logger.debug(f"获取到 {len(backup_files)} 个备份文件")
             
             # 安全设置行数
             row_count = len(backup_files)
@@ -353,7 +356,7 @@ class DatabaseManagerDialog(QDialog):
             QApplication.quit()
             
         except Exception as e:
-            print(f"重启程序失败: {e}")
+            logger.error(f"重启程序失败: {e}", exc_info=True)
             QMessageBox.warning(self, "警告", f"自动重启失败，请手动重启程序: {str(e)}")
     
     def start_backup_operation(self, operation, backup_file=None):

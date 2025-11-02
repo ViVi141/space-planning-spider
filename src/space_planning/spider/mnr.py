@@ -13,32 +13,31 @@ LEVEL_NAME = "自然资源部"
 # 导入监控和防反爬虫模块
 from .monitor import CrawlerMonitor
 from .anti_crawler import AntiCrawlerManager
+from .spider_config import SpiderConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MNRSpider:
     """
     自然资源部 法律法规库 爬虫
     """
     def __init__(self):
-        self.base_url = 'https://gi.mnr.gov.cn/'
-        self.search_api = 'https://search.mnr.gov.cn/was5/web/search'
-        self.ajax_api = 'https://search.mnr.gov.cn/was/ajaxdata_jsonp.jsp'
-        self.level = '自然资源部'
-        self.speed_mode = "正常速度"  # 添加速度模式
+        # 从配置获取参数
+        config = SpiderConfig.get_mnr_config()
+        
+        self.base_url = config['base_url']
+        self.search_api = config['search_api']
+        self.ajax_api = config['ajax_api']
+        self.level = config['level']
+        self.speed_mode = config['default_speed_mode']
+        self.headers = config['headers'].copy()
+        self.max_pages = config['max_pages']
+        self.channel_id = config['channel_id']
         
         # 初始化监控和防反爬虫管理器
         self.monitor = CrawlerMonitor()
         self.anti_crawler = AntiCrawlerManager()
-        
-        # 先定义headers
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Referer': 'https://gi.mnr.gov.cn/',
-            'X-Requested-With': 'XMLHttpRequest'
-        }
-        self.max_pages = 999999  # 最大翻页数（无上限）
-        self.channel_id = '216640'  # 政府信息公开平台的频道ID
         
         # 创建会话用于代理支持
         self.session = requests.Session()
@@ -80,9 +79,9 @@ class MNRSpider:
                 proxy_dict = get_shared_proxy()
                 if proxy_dict:
                     self.session.proxies.update(proxy_dict)
-                    print(f"MNRSpider: 已设置代理: {proxy_dict}")
+                    logger.info(f"MNRSpider: 已设置代理: {proxy_dict}")
         except Exception as e:
-            print(f"MNRSpider: 初始化代理失败: {e}")
+            logger.warning(f"MNRSpider: 初始化代理失败: {e}", exc_info=True)
     
     def _update_proxy(self):
         """更新代理（每次请求前调用）"""
@@ -110,12 +109,21 @@ class MNRSpider:
             proxy_dict = get_shared_proxy()
             if proxy_dict:
                 self.session.proxies.update(proxy_dict)
-        except Exception:
-            pass  # 代理获取失败时继续使用当前代理或无代理
+                logger.debug(f"[代理验证] MNRSpider: 已更新代理: {proxy_dict}")
+                # 验证代理设置
+                session_proxies = getattr(self.session, 'proxies', {})
+                if session_proxies:
+                    logger.debug(f"[代理验证] MNRSpider: 会话代理设置验证成功: {session_proxies}")
+                else:
+                    logger.warning("[代理验证] MNRSpider: 警告: 代理字典更新后，会话中未检测到代理设置")
+            else:
+                logger.warning("[代理验证] MNRSpider: 警告: 无法获取代理（代理池可能未运行）")
+        except Exception as e:
+            logger.debug(f"[代理验证] MNRSpider: 更新代理失败: {e}，继续使用当前代理或无代理")
 
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
                       speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, 
-                      category=None):
+                      category=None, policy_callback=None):
         """
         爬取自然资源部法律法规库
         :param keywords: 关键词列表
@@ -123,6 +131,7 @@ class MNRSpider:
         :param start_date: 起始日期 yyyy-MM-dd
         :param end_date: 结束日期 yyyy-MM-dd
         :param category: 分类名称，None表示搜索全部分类
+        :param policy_callback: 政策数据回调函数，每解析到一条政策时调用
         :return: list[dict]
         """
         if keywords is None:
@@ -163,11 +172,15 @@ class MNRSpider:
         # 分页获取数据 - 重置所有计数变量
         page = 1
         category_results = []
+        
+        # 从通用配置获取参数
+        common_config = SpiderConfig.get_common_config()
+        max_consecutive_empty = common_config['max_empty_pages']  # 最大连续空页数
+        max_consecutive_filtered = common_config['max_empty_pages']  # 最大连续过滤页数
+        
         consecutive_empty_pages = 0  # 连续空页计数
-        max_consecutive_empty = 3  # 最大连续空页数
         new_policies_count = 0  # 新增政策计数
         consecutive_filtered_pages = 0  # 连续过滤页计数（有数据但都被过滤）
-        max_consecutive_filtered = 3  # 最大连续过滤页数
         
         while page <= self.max_pages:
             if stop_callback and stop_callback():
@@ -292,6 +305,9 @@ class MNRSpider:
                     if link:
                         content = self.get_policy_detail(link)
                         policy['content'] = content
+                    else:
+                        # 确保 content 字段存在
+                        policy['content'] = policy.get('content', '')
                     
                     # 添加到已见集合
                     seen_titles.add(unique_id)
@@ -299,6 +315,13 @@ class MNRSpider:
                     
                     filtered_policies.append(policy)
                     new_policies_count += 1
+                    
+                    # 调用 policy_callback 实时返回政策数据（确保 content 已填充）
+                    if policy_callback:
+                        try:
+                            policy_callback(policy)
+                        except Exception as cb_error:
+                            logger.warning(f"调用 policy_callback 失败: {cb_error}")
                     
                     # 发送政策数据信号（包含正文）
                     if callback:
@@ -330,11 +353,8 @@ class MNRSpider:
                 elif new_policies_count > 0:
                     # 有新增数据，重置过滤页计数
                     consecutive_filtered_pages = 0
-                elif new_policies_count == 0 and len(page_policies) == 0:
-                    # 这种情况已经在上面处理过了，不应该再次计数
-                    pass
-                else:
-                    consecutive_empty_pages = 0
+                # new_policies_count == 0 and len(page_policies) == 0 的情况已经在上面处理过了
+                # 其他情况下如果page_policies不为空，说明有数据，重置空页计数（虽然不会到这里）
                 
                 # 控制速度
                 if not disable_speed_limit:
@@ -374,18 +394,36 @@ class MNRSpider:
                 items = []
             
             for item in items:
+                # 尝试获取内容（如果API返回）
+                content = item.get('content', '').strip()
+                # 如果API没有返回内容，尝试从其他字段获取
+                if not content:
+                    content = item.get('summary', '').strip() or item.get('abstract', '').strip()
+                
+                # 解析并格式化日期
+                raw_date = item.get('pubdate', item.get('publishdate', ''))
+                pub_date = ''
+                if raw_date:
+                    parsed_date = self._parse_date(raw_date)
+                    if parsed_date:
+                        pub_date = parsed_date.strftime('%Y-%m-%d')
+                    else:
+                        # 如果解析失败，尝试直接使用原始值（可能已经是标准格式）
+                        pub_date = raw_date.strip()
+                
                 policy = {
                     'level': self.level,
-                    'title': item.get('title', ''),
-                    'pub_date': item.get('pubdate', item.get('publishdate', '')),
-                    'doc_number': item.get('filenum', ''),
-                    'source': item.get('url', ''),
-                    'content': '',
-                    'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'category': item.get('category', ''),
-                    'validity': item.get('status', ''),
-                    'effective_date': item.get('effectivedate', ''),
-                    'link': item.get('url', '')
+                    'title': item.get('title', '') or '',
+                    'pub_date': pub_date or '',  # 统一为 YYYY-MM-DD 格式
+                    'doc_number': item.get('filenum', '') or '',
+                    'source': item.get('url', '') or '',  # 主要字段：source
+                    'url': item.get('url', '') or '',  # 兼容字段
+                    'link': item.get('url', '') or '',  # 兼容字段
+                    'content': content or '',  # 确保content字段存在
+                    'category': item.get('category', '') or '',  # 确保category字段存在
+                    'validity': item.get('status', '') or '',
+                    'effective_date': item.get('effectivedate', '') or '',
+                    'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 policies.append(policy)
                     
@@ -484,13 +522,23 @@ class MNRSpider:
                                     doc_number = doc_number_cells[i + 1].get_text(strip=True)
                                 break
                     
+                    # 解析并格式化日期
+                    pub_date_formatted = ''
+                    if pub_date:
+                        parsed_date = self._parse_date(pub_date)
+                        if parsed_date:
+                            pub_date_formatted = parsed_date.strftime('%Y-%m-%d')
+                        else:
+                            # 如果解析失败，尝试直接使用原始值（可能已经是标准格式）
+                            pub_date_formatted = pub_date.strip()
+                    
                     policy = {
                         'level': self.level,
                         'title': title,
-                        'pub_date': pub_date,
+                        'pub_date': pub_date_formatted,  # 统一为 YYYY-MM-DD 格式
                         'doc_number': doc_number,
                         'source': detail_url,
-                        'content': '',
+                        'content': '',  # 初始为空，会在crawl_policies中填充
                         'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         'category': category_name,
                         'validity': '',

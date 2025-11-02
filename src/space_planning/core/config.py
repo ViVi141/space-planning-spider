@@ -7,6 +7,13 @@
 import os
 import sys
 import json
+import logging
+
+# 初始化日志（延迟导入避免循环依赖）
+logger = logging.getLogger(__name__)
+
+# 导入异常类
+from .exceptions import ConfigError, ConfigFileNotFoundError, ConfigParseError
 
 # 应用配置
 APP_CONFIG = {
@@ -50,6 +57,9 @@ UI_CONFIG = {
     'window_height': 900,
     'table_row_height': 60,
     'text_area_height': 250,
+    'max_display_rows': 100,  # 最大显示行数
+    'page_size': 50,  # 每页显示行数
+    'default_thread_count': 4,  # 默认多线程数量
 }
 
 # 政策类型关键词
@@ -123,9 +133,15 @@ class AppConfig:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self.config = json.load(f)
-            except Exception as e:
-                print(f"加载配置文件失败: {e}")
+            except FileNotFoundError:
+                logger.warning("配置文件不存在，使用默认配置")
                 self.config = self._get_default_config()
+            except json.JSONDecodeError as e:
+                logger.error(f"配置文件格式错误: {e}", exc_info=True)
+                raise ConfigParseError(f"配置文件解析失败: {e}") from e
+            except Exception as e:
+                logger.error(f"加载配置文件失败: {e}", exc_info=True)
+                raise ConfigError(f"配置加载失败: {e}") from e
         else:
             self.config = self._get_default_config()
             self._save_config()
@@ -150,8 +166,12 @@ class AppConfig:
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, ensure_ascii=False, indent=2)
+        except (OSError, IOError) as e:
+            logger.error(f"保存配置文件失败（文件操作错误）: {e}", exc_info=True)
+            raise ConfigError(f"配置保存失败: {e}") from e
         except Exception as e:
-            print(f"保存配置文件失败: {e}")
+            logger.error(f"保存配置文件失败（未知错误）: {e}", exc_info=True)
+            raise ConfigError(f"配置保存失败: {e}") from e
     
     def get_database_path(self):
         """获取数据库路径"""

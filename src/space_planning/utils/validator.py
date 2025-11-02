@@ -239,34 +239,9 @@ class InputValidator:
         return filename
     
     @staticmethod
-    def validate_integer(value: str, min_val: Optional[int] = None, max_val: Optional[int] = None) -> Optional[int]:
-        """
-        验证整数
-        
-        Args:
-            value: 字符串值
-            min_val: 最小值
-            max_val: 最大值
-            
-        Returns:
-            验证通过的整数值，否则返回None
-        """
-        try:
-            int_val = int(value)
-            
-            if min_val is not None and int_val < min_val:
-                return None
-            if max_val is not None and int_val > max_val:
-                return None
-            
-            return int_val
-        except (ValueError, TypeError):
-            return None
-    
-    @staticmethod
     def sanitize_level(level: str) -> Optional[str]:
         """
-        验证和清理机构级别
+        验证和清理机构级别（使用白名单机制）
         
         Args:
             level: 机构级别字符串
@@ -274,24 +249,66 @@ class InputValidator:
         Returns:
             验证通过的级别，否则返回None
         """
-        if not level:
+        if not level or not isinstance(level, str):
             return None
         
-        # 允许的机构列表（白名单）
+        # 允许的机构列表（白名单）- 严格验证
         allowed_levels = [
             "住房和城乡建设部",
             "广东省人民政府",
             "自然资源部",
             "国家发展和改革委员会",
             "生态环境部",
-            # 可以根据需要添加更多
+            "交通运输部",
+            "水利部",
+            "农业农村部",
         ]
         
-        # 检查是否在允许列表中
+        # 检查是否在允许列表中（精确匹配）
         if level in allowed_levels:
             return level
         
-        # 如果没有匹配，记录警告但允许（为了兼容性）
-        logger.warning(f"未知的机构级别: {level}")
-        return level  # 暂时允许，但记录警告
+        # 检查是否包含危险字符
+        if any(pattern in level for pattern in [';', '--', '/*', '*/', 'DROP', 'DELETE', 'INSERT', 'UPDATE']):
+            logger.warning(f"机构级别包含危险字符，已拒绝: {level}")
+            return None
+        
+        # 如果没有匹配白名单，记录警告并拒绝（安全优先）
+        logger.warning(f"未知的机构级别，已拒绝: {level}")
+        return None
+    
+    @staticmethod
+    def validate_integer(value: any, min_val: Optional[int] = None, max_val: Optional[int] = None, default: Optional[int] = None) -> Optional[int]:
+        """
+        验证整数参数（用于limit、offset等）
+        
+        Args:
+            value: 要验证的值
+            min_val: 最小值（包含）
+            max_val: 最大值（包含）
+            default: 默认值（如果验证失败）
+            
+        Returns:
+            验证通过的整数，否则返回None或default
+        """
+        if value is None:
+            return default
+        
+        try:
+            # 尝试转换为整数
+            int_value = int(value)
+            
+            # 检查范围
+            if min_val is not None and int_value < min_val:
+                logger.warning(f"整数值 {int_value} 小于最小值 {min_val}")
+                return default
+            
+            if max_val is not None and int_value > max_val:
+                logger.warning(f"整数值 {int_value} 大于最大值 {max_val}")
+                return default
+            
+            return int_value
+        except (ValueError, TypeError):
+            logger.warning(f"无效的整数值: {value}")
+            return default
 

@@ -18,6 +18,9 @@ from kdl.client import Client
 
 from space_planning.spider.proxy_pool import ProxyPool, get_proxy_stats
 from space_planning.utils.crypto import SecureConfig
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ProxyTestThread(QThread):
@@ -122,7 +125,7 @@ class ProxySettingsDialog(QDialog):
             if os.path.exists(self.config_template):
                 import shutil
                 shutil.copy2(self.config_template, self.config_file)
-                print(f"已从模板创建配置文件: {self.config_file}")
+                logger.info(f"已从模板创建配置文件: {self.config_file}")
         
         # 初始化安全配置管理器
         self.secure_config = SecureConfig(self.config_file)
@@ -131,7 +134,7 @@ class ProxySettingsDialog(QDialog):
         try:
             self.secure_config.migrate_plaintext_to_encrypted()
         except Exception as e:
-            print(f"配置迁移失败: {e}")
+            logger.error(f"配置迁移失败: {e}", exc_info=True)
         
         # 初始化代理配置（从加密配置读取）
         self.proxy_config = self.load_config()
@@ -179,7 +182,7 @@ class ProxySettingsDialog(QDialog):
             
             return config
         except Exception as e:
-            print(f"加载代理配置失败: {e}")
+            logger.error(f"加载代理配置失败: {e}", exc_info=True)
             # 返回默认配置
             return {
                 'enabled': False,
@@ -216,11 +219,11 @@ class ProxySettingsDialog(QDialog):
             if password:
                 self.secure_config.set_sensitive('password', password)
             
-            print("代理配置已保存（敏感信息已加密）")
+            logger.info("代理配置已保存（敏感信息已加密）")
             return True
         except Exception as e:
             QMessageBox.warning(self, "保存失败", f"保存配置失败: {e}")
-            print(f"保存配置异常: {e}")
+            logger.error(f"保存配置异常: {e}", exc_info=True)
             import traceback
             traceback.print_exc()
             return False
@@ -286,13 +289,13 @@ class ProxySettingsDialog(QDialog):
         
         self.secret_id_edit = QLineEdit()
         self.secret_id_edit.setText(self.proxy_config.get('secret_id', ''))
-        self.secret_id_edit.setPlaceholderText("请输入快代理订单号")
-        api_layout.addRow("订单号:", self.secret_id_edit)
+        self.secret_id_edit.setPlaceholderText("请输入订单API密钥的SecretId")
+        api_layout.addRow("订单API密钥的SecretId:", self.secret_id_edit)
         
         self.secret_key_edit = QLineEdit()
         self.secret_key_edit.setText(self.proxy_config.get('secret_key', ''))
-        self.secret_key_edit.setPlaceholderText("请输入快代理密钥")
-        api_layout.addRow("密钥:", self.secret_key_edit)
+        self.secret_key_edit.setPlaceholderText("请输入订单API密钥的SecretKey")
+        api_layout.addRow("订单API密钥的SecretKey:", self.secret_key_edit)
         
         api_group.setLayout(api_layout)
         layout.addRow(api_group)
@@ -352,7 +355,7 @@ class ProxySettingsDialog(QDialog):
         # 测试说明
         info_label = QLabel(
             "点击下方按钮测试代理连接。测试将使用当前配置尝试获取一个代理。\n"
-            "请确保已正确填写订单号和密钥。"
+            "请确保已正确填写订单API密钥的SecretId和SecretKey。"
         )
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
@@ -399,7 +402,7 @@ class ProxySettingsDialog(QDialog):
         config = self.get_config()
         
         if not config['secret_id'] or not config['secret_key']:
-            QMessageBox.warning(self, "配置错误", "订单号和密钥为必填项")
+            QMessageBox.warning(self, "配置错误", "订单API密钥的SecretId和SecretKey为必填项")
             return
         
         # 禁用测试按钮
@@ -517,23 +520,23 @@ class ProxySettingsDialog(QDialog):
             from space_planning.spider.proxy_pool import initialize_proxy_pool, set_global_proxy_enabled
             
             if os.path.exists(self.config_file):
-                print("正在初始化代理池...")
+                logger.info("正在初始化代理池...")
                 initialize_proxy_pool(self.config_file)
-                print("代理池初始化完成")
+                logger.info("代理池初始化完成")
                 
                 # 根据配置设置代理状态
                 if self.proxy_config.get('enabled', False):
                     set_global_proxy_enabled(True)
-                    print("代理已启用")
+                    logger.info("代理已启用")
                 else:
                     set_global_proxy_enabled(False)
-                    print("代理已禁用")
+                    logger.info("代理已禁用")
             else:
-                print("代理配置文件不存在，将禁用代理功能")
+                logger.warning("代理配置文件不存在，将禁用代理功能")
                 set_global_proxy_enabled(False)
                 
         except Exception as e:
-            print(f"代理系统初始化失败: {e}")
+            logger.error(f"代理系统初始化失败: {e}", exc_info=True)
             # 确保代理被禁用
             try:
                 from space_planning.spider.proxy_pool import set_global_proxy_enabled

@@ -187,7 +187,7 @@ class BaseCrawler:
     def save_data(self, data: Dict) -> bool:
         """保存数据（子类可重写）"""
         # 默认实现：打印数据
-        print(f"数据: {data}")
+        self.logger.debug(f"数据: {data}")
         return True
     
     def run(self, urls: List[str]) -> List[Dict]:

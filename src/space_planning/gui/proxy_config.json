@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "max_proxies": 10,
+  "check_interval": 300,
+  "username": "",
+  "secret_id": "b2NoaWFiZml2czAwMTM4ZGw1amw=",
+  "secret_key": "dTVjNWgxbTUzbjk0NXRvbDVic3k5bXV2M2Q4OGd1OWU="
+}

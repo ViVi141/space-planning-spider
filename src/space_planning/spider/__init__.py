@@ -7,7 +7,10 @@
 import pkgutil
 import importlib
 import os
+import logging
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 def get_all_spider_levels() -> List[str]:
     """获取所有爬虫模块的机构名称"""
@@ -22,7 +25,7 @@ def get_all_spider_levels() -> List[str]:
                 if level:
                     levels.append(level)
             except Exception as e:
-                print(f"加载爬虫模块{modname}失败: {e}")
+                logger.error(f"加载爬虫模块{modname}失败: {e}", exc_info=True)
     
     return sorted(levels)
 
@@ -42,7 +45,7 @@ def get_spider_by_level(level: str):
                             if hasattr(spider_class, '__call__'):  # 确保是可调用的类
                                 return spider_class()
             except Exception as e:
-                print(f"获取爬虫实例失败 {modname}: {e}")
+                logger.error(f"获取爬虫实例失败 {modname}: {e}", exc_info=True)
     
     return None
 
@@ -62,6 +65,6 @@ def get_spider_class_by_level(level: str):
                             if hasattr(spider_class, '__call__'):  # 确保是可调用的类
                                 return spider_class
             except Exception as e:
-                print(f"获取爬虫类失败 {modname}: {e}")
+                logger.error(f"获取爬虫类失败 {modname}: {e}", exc_info=True)
     
     return None 

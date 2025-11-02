@@ -165,14 +165,25 @@ class EnhancedBaseCrawler:
                     'https': f'http://{proxy_info.ip}:{proxy_info.port}'
                 }
             elif isinstance(proxy_info, dict):
-                # 这是字典格式
-                if 'ip' in proxy_info and 'port' in proxy_info:
+                # 检查是否是标准的requests代理字典格式（已经包含 'http' 和/或 'https' 键）
+                if 'http' in proxy_info or 'https' in proxy_info:
+                    # 这是标准的requests代理格式，直接使用
+                    proxy_dict = proxy_info.copy()
+                    # 如果只有http或只有https，补充另一个
+                    if 'http' in proxy_dict and 'https' not in proxy_dict:
+                        proxy_dict['https'] = proxy_dict['http']
+                    elif 'https' in proxy_dict and 'http' not in proxy_dict:
+                        proxy_dict['http'] = proxy_dict['https']
+                    self.logger.debug(f"使用标准代理字典格式: {proxy_dict}")
+                elif 'ip' in proxy_info and 'port' in proxy_info:
+                    # 这是包含ip和port的字典，需要转换
                     proxy_dict = {
                         'http': f'http://{proxy_info["ip"]}:{proxy_info["port"]}',
                         'https': f'http://{proxy_info["ip"]}:{proxy_info["port"]}'
                     }
+                    self.logger.debug(f"从ip:port格式转换代理: {proxy_dict}")
                 else:
-                    self.logger.warning(f"代理信息格式错误: {proxy_info}")
+                    self.logger.warning(f"代理信息格式错误（缺少http/https或ip/port）: {proxy_info}")
                     return None
             else:
                 self.logger.warning(f"不支持的代理信息类型: {type(proxy_info)}")
@@ -237,10 +248,12 @@ class EnhancedBaseCrawler:
                     self.successful_requests += 1
                     
                     # 报告代理使用成功
-                    if proxy_dict and hasattr(self, 'current_proxy_info'):
-                        proxy_info = self.proxy_manager.get_proxy()  # 重新获取代理信息
-                        if proxy_info:
-                            self.proxy_manager.report_result(proxy_info, True, request_info['response_time'])
+                    if proxy_dict:
+                        try:
+                            # PersistentProxyManager.report_result() 只需要 success 和 response_time 两个参数
+                            self.proxy_manager.report_result(True, request_info['response_time'])
+                        except Exception as report_error:
+                            self.logger.debug(f"报告代理结果失败: {report_error}")
                     
                     self.logger.debug(f"请求成功: {url} (耗时: {request_info['response_time']:.2f}s)")
                     return response, request_info
@@ -265,13 +278,16 @@ class EnhancedBaseCrawler:
                     return response, request_info
                     
             except Exception as e:
+                error_msg = str(e)
                 self.logger.warning(f"请求失败 (尝试 {attempt + 1}/{self.max_retries + 1}): {url}, 错误: {e}")
                 
                 # 报告代理使用失败
                 if proxy_dict:
-                    proxy_info = self.proxy_manager.get_proxy()  # 重新获取代理信息
-                    if proxy_info:
-                        self.proxy_manager.report_result(proxy_info, False, time.time() - start_time)
+                    try:
+                        # PersistentProxyManager.report_result() 接受 success, response_time 和可选的 error_msg
+                        self.proxy_manager.report_result(False, time.time() - start_time, error_msg)
+                    except Exception as report_error:
+                        self.logger.debug(f"报告代理结果失败: {report_error}")
                 
                 # 如果不是最后一次尝试，等待后重试
                 if attempt < self.max_retries:

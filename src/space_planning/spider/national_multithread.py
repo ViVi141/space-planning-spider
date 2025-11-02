@@ -17,6 +17,7 @@ import threading
 from .multithread_base_crawler import MultiThreadBaseCrawler
 from .anti_crawler import AntiCrawlerManager
 from .monitor import CrawlerMonitor
+from .spider_config import SpiderConfig
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +28,13 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
     def __init__(self, max_workers=4, enable_proxy=True):
         super().__init__(max_workers, enable_proxy)
         
-        # 住建部特定配置
-        self.api_url = "https://www.mohurd.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit"
-        self.level = "住房和城乡建设部"
+        # 从配置获取参数
+        config = SpiderConfig.get_national_config()
+        
+        self.api_url = config['api_url']
+        self.level = config['level']
+        self.base_url = config['base_url']
+        self.base_params = config['base_params'].copy()
         
         # 初始化防反爬虫管理器
         self.anti_crawler = AntiCrawlerManager()
@@ -56,30 +61,16 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
         else:
             self.proxy_manager = None
         
-        # 基础参数
-        self.base_params = {
-            'webId': '86ca573ec4df405db627fdc2493677f3',
-            'pageId': 'vhiC3JxmPC8o7Lqg4Jw0E',
-            'parseType': 'bulidstatic',
-            'pageType': 'column',
-            'tagId': '内容1',
-            'tplSetId': 'fc259c381af3496d85e61997ea7771cb',
-            'unitUrl': '/api-gateway/jpaas-publish-server/front/page/build/unit'
-        }
-        
-        # 设置特定的请求头
-        self.special_headers = {
-            'Accept': '*/*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
+        # 设置特定的请求头（住建部网站需要）
+        self.special_headers = config['headers'].copy()
+        self.special_headers.update({
             'Connection': 'keep-alive',
-            'Referer': 'https://www.mohurd.gov.cn/gongkai/zc/wjk/index.html',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'X-KL-SaaS-Ajax-Request': 'Ajax_Request',
             'X-Requested-With': 'XMLHttpRequest'
-        }
+        })
         
         logger.info(f"初始化国家住建部多线程爬虫，线程数: {max_workers}, 代理启用: {enable_proxy}")
     
@@ -148,9 +139,13 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
             callback(f"线程 {thread_name} 开始处理 {description}")
         
         policies = []
-        page_size = 30
-        page_no = 1 # 每个任务从第1页开始
-        max_pages = 50 # 每个任务最多爬取50页
+        
+        # 从通用配置获取参数
+        common_config = SpiderConfig.get_common_config()
+        page_size = common_config['page_size']
+        page_no = 1  # 每个任务从第1页开始
+        max_pages = 50  # 每个任务最多爬取50页
+        max_consecutive_out_of_range = common_config['max_consecutive_out_of_range']
         
         # 设置速度模式
         speed_mode = getattr(self, 'speed_mode', '正常速度')
@@ -169,7 +164,6 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
         dt_end = datetime.strptime(end_date, '%Y-%m-%d')
         in_target_range = False  # 是否已进入目标时间区间
         consecutive_out_of_range = 0  # 连续超出范围的页数
-        max_consecutive_out_of_range = 5  # 最大连续超出范围页数
         
         # 检查代理状态
         if self.enable_proxy and hasattr(self, 'proxy_manager') and self.proxy_manager:
@@ -289,8 +283,8 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                             doc_number = cells_list[2].get_text(strip=True) if len(cells_list) > 2 and isinstance(cells_list[2], Tag) else ''
                             pub_date = cells_list[3].get_text(strip=True) if len(cells_list) > 3 and isinstance(cells_list[3], Tag) else ''
                             
-                            if url and not url.startswith('http'):
-                                url = 'https://www.mohurd.gov.cn' + str(url)
+                            if url and not str(url).startswith('http'):
+                                url = self.base_url + str(url)
                             
                             # 解析日期
                             try:
@@ -405,15 +399,17 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
             # 解析链接
             url = item.get('url', '')
             if url and not url.startswith('http'):
-                url = f"https://www.mohurd.gov.cn{url}"
+                url = f"{self.base_url}{url}"
             
             return {
                 'level': self.level,
-                'title': title,
-                'pub_date': pub_date,
-                'source': source,
-                'content': content,
-                'url': url,
+                'title': title or '',
+                'pub_date': pub_date or '',
+                'source': source or url or '',  # 主要字段：source，优先使用source，否则使用url
+                'url': url or source or '',  # 兼容字段
+                'link': url or source or '',  # 兼容字段
+                'content': content or '',
+                'category': '',  # 添加category字段（住建部没有分类）
                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             

@@ -16,211 +16,30 @@ from space_planning.utils.export import export_to_word
 from space_planning.utils.compare import PolicyComparer
 from space_planning.utils.compliance import ComplianceAnalyzer
 from space_planning.gui.crawler_status_dialog import CrawlerStatusDialog
+from space_planning.gui.search_thread import SearchThread
+from space_planning.gui.table_manager import TableManager
+from space_planning.gui.table_display_config import TableDisplayConfig
+from space_planning.core.logger_config import get_logger
 
+logger = get_logger(__name__)
 
-
-class SearchThread(QThread):
-    """搜索线程，避免界面卡死"""
-    progress_signal = pyqtSignal(str)  # 进度信号
-    result_signal = pyqtSignal(list)   # 初始数据库结果
-    single_policy_signal = pyqtSignal(object)  # 新增单条政策
-    finished_signal = pyqtSignal()     # 完成信号
-    error_signal = pyqtSignal(str)     # 错误信号
-    data_count_signal = pyqtSignal(int)  # 数据量信号
-    
-    def __init__(self, level, keywords, need_crawl=True, start_date=None, end_date=None, enable_anti_crawler=True, speed_mode="正常速度", spider=None, main_window=None, use_multithread=False, thread_count=4):
-        super().__init__()
-        self.level = level
-        self.keywords = keywords
-        self.need_crawl = need_crawl
-        self.start_date = start_date
-        self.end_date = end_date
-        self.enable_anti_crawler = enable_anti_crawler
-        self.speed_mode = speed_mode
-        self.spider = spider  # 使用传入的spider实例
-        self.main_window = main_window  # 保存主窗口引用，用于访问持久爬虫实例
-        self.stop_flag = False  # 停止标志
-        self.use_multithread = use_multithread  # 是否使用多线程
-        self.thread_count = thread_count  # 线程数量
-    
-    def run(self):
-        try:
-            # 第一步：查询数据库现有数据
-            self.progress_signal.emit("正在查询数据库...")
-            db_results = db.search_policies(self.level, self.keywords, self.start_date, self.end_date)
-            self.progress_signal.emit(f"数据库中找到 {len(db_results)} 条相关数据")
-            
-            # 实时显示数据库结果
-            self.result_signal.emit(db_results)
-            
-            if self.need_crawl and not self.stop_flag:
-                self.progress_signal.emit("正在爬取最新数据...")
-                # 根据选择的机构使用对应的持久爬虫实例
-                if self.main_window:
-                    if self.level == "住房和城乡建设部":
-                        # 根据是否启用多线程选择不同的爬虫实例
-                        if self.use_multithread:
-                            spider = self.main_window.national_multithread_spider
-                        else:
-                            spider = self.main_window.national_spider
-                    elif self.level == "广东省人民政府":
-                        # 根据是否启用多线程选择不同的爬虫实例
-                        if self.use_multithread:
-                            spider = self.main_window.guangdong_multithread_spider
-                        else:
-                            spider = self.main_window.guangdong_spider
-                    elif self.level == "自然资源部":
-                        # 根据是否启用多线程选择不同的爬虫实例
-                        if self.use_multithread:
-                            spider = self.main_window.mnr_multithread_spider
-                        else:
-                            spider = self.main_window.mnr_spider
-                    else:
-                        # 其他机构暂时使用国家级爬虫
-                        spider = self.main_window.national_spider
-                    
-                    # 更新当前使用的爬虫实例
-                    self.spider = spider
-                
-                if spider:
-                    # 根据速度模式和防反爬虫设置调整爬虫行为
-                    if self.speed_mode == "快速模式":
-                        # 快速模式：优先速度，禁用大部分限制
-                        self.progress_signal.emit("🚀 快速模式：已禁用防反爬虫限制，优先速度")
-                        disable_speed_limit = True
-                    elif self.speed_mode == "慢速模式":
-                        # 慢速模式：优先安全，启用所有防反爬虫措施
-                        self.progress_signal.emit("🐌 慢速模式：已启用完整防反爬虫措施，优先安全")
-                        disable_speed_limit = False
-                    else:  # 正常速度
-                        # 正常模式：根据用户设置决定
-                        if not self.enable_anti_crawler:
-                            self.progress_signal.emit("⚡ 正常速度：已禁用速度限制")
-                            disable_speed_limit = True
-                        else:
-                            self.progress_signal.emit("🛡️ 正常速度：已启用防反爬虫措施")
-                            disable_speed_limit = False
-                    
-                    # 自定义回调函数，实时更新进度和发送数据
-                    def progress_callback(message):
-                        if message.startswith("POLICY_DATA:"):
-                            # 解析政策数据
-                            data_parts = message[12:].split("|")
-                            if len(data_parts) >= 4:
-                                policy = {
-                                    'level': self.level,  # 使用当前选择的机构级别
-                                    'title': data_parts[0],
-                                    'pub_date': data_parts[1],
-                                    'source': data_parts[2],
-                                    'content': data_parts[3],
-                                    'category': data_parts[4] if len(data_parts) > 4 else None,  # 添加分类字段
-                                    'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                                }
-                                # 立即发送到界面
-                                self.single_policy_signal.emit(policy)
-                        else:
-                            self.progress_signal.emit(f"爬取进度: {message}")
-                    
-                    # 调用爬虫方法
-                    if self.use_multithread:
-                        # 检查是否有多线程爬虫类
-                        if hasattr(spider, 'crawl_multithread'):
-                            self.progress_signal.emit(f"🚀 启用多线程爬取，使用 {self.thread_count} 个线程")
-                            new_policies = spider.crawl_multithread(
-                                callback=progress_callback,
-                                stop_callback=lambda: self.stop_flag,
-                                max_workers=self.thread_count,
-                                start_date=self.start_date,
-                                end_date=self.end_date
-                            )
-                        elif hasattr(spider, 'crawl_policies_multithread'):
-                            # 兼容广东省的多线程方法
-                            self.progress_signal.emit(f"🚀 启用多线程爬取，使用 {self.thread_count} 个线程")
-                            new_policies = spider.crawl_policies_multithread(
-                                keywords=self.keywords,
-                                callback=progress_callback,
-                                start_date=self.start_date,
-                                end_date=self.end_date,
-                                speed_mode=self.speed_mode,
-                                disable_speed_limit=disable_speed_limit,
-                                stop_callback=lambda: self.stop_flag,
-                                max_workers=self.thread_count
-                            )
-                        else:
-                            # 如果没有多线程方法，回退到单线程
-                            self.progress_signal.emit("⚠️ 多线程爬虫不可用，回退到单线程模式")
-                            new_policies = spider.crawl_policies(
-                                keywords=self.keywords,
-                                callback=progress_callback,
-                                start_date=self.start_date,
-                                end_date=self.end_date,
-                                speed_mode=self.speed_mode,
-                                disable_speed_limit=disable_speed_limit,
-                                stop_callback=lambda: self.stop_flag
-                            )
-                    else:
-                        # 单线程模式
-                        if self.level == "广东省人民政府":
-                            # 广东省爬虫使用快速方法（跳过分类遍历，大幅提升速度）
-                            new_policies = getattr(spider, 'crawl_policies_fast', 
-                                                  getattr(spider, 'crawl_policies_optimized', spider.crawl_policies))(
-                                keywords=self.keywords,
-                                callback=progress_callback,
-                                start_date=self.start_date,
-                                end_date=self.end_date,
-                                speed_mode=self.speed_mode,
-                                disable_speed_limit=disable_speed_limit,
-                                stop_callback=lambda: self.stop_flag
-                            )
-                        else:
-                            # 其他爬虫使用标准方法
-                            new_policies = spider.crawl_policies(
-                                keywords=self.keywords,
-                                callback=progress_callback,
-                                start_date=self.start_date,
-                                end_date=self.end_date,
-                                speed_mode=self.speed_mode,
-                                disable_speed_limit=disable_speed_limit,
-                                stop_callback=lambda: self.stop_flag
-                            )
-                else:
-                    new_policies = []
-                
-                # 注意：实时保存和显示数据已经在爬取过程中通过single_policy_signal完成
-                # 这里不需要再次保存，避免重复保存
-                if not self.stop_flag:
-                    self.progress_signal.emit(f"爬取完成，共获取 {len(new_policies)} 条新数据")
-                else:
-                    self.progress_signal.emit("搜索已停止")
-                    # 停止后也要显示已爬取的数据
-                    if new_policies:
-                        self.progress_signal.emit(f"已停止，共获取 {len(new_policies)} 条数据")
-            else:
-                self.progress_signal.emit("数据库数据充足，无需爬取新数据")
-            
-            # 最终查询结果 - 重新查询数据库以获取所有数据（包括新爬取的）
-            final_results = db.search_policies(self.level, self.keywords, self.start_date, self.end_date)
-            self.result_signal.emit(final_results)
-            
-            # 发送数据量信号
-            self.data_count_signal.emit(len(final_results))
-            
-            self.finished_signal.emit()
-            
-        except Exception as e:
-            self.error_signal.emit(str(e))
-    
-    def stop(self):
-        """停止搜索"""
-        self.stop_flag = True
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.max_display_rows = 100  # 最大显示100行
-        self.page_size = 50  # 每页50行
+        # 从配置获取UI参数
+        from space_planning.core.config import app_config
+        ui_config = app_config.get_ui_config()
+        
+        self.max_display_rows = ui_config.get('max_display_rows', 100)  # 最大显示行数
+        self.page_size = ui_config.get('page_size', 50)  # 每页行数
         self.current_page = 0  # 当前页码
-        self.setWindowTitle("空间规划政策合规性分析系统 v3.0.1 - ViVi141")
+        
+        # 从配置获取应用信息
+        from space_planning.core.config import APP_CONFIG
+        app_name = APP_CONFIG['app_name']
+        app_version = APP_CONFIG['app_version']
+        self.setWindowTitle(f"{app_name} v{app_version} - ViVi141")
         
         # 设置窗口图标
         icon_path = os.path.join(os.path.dirname(__file__), "../../../docs/icon.ico")
@@ -228,12 +47,22 @@ class MainWindow(QMainWindow):
             from PyQt5.QtGui import QIcon
             self.setWindowIcon(QIcon(icon_path))
         
-        self.resize(1400, 900)
+        # 从配置获取窗口大小
+        window_width = ui_config.get('window_width', 1400)
+        window_height = ui_config.get('window_height', 900)
+        self.resize(window_width, window_height)
+        
+        # 设置窗口最小和最大尺寸，防止窗口被拉宽
+        self.setMinimumSize(window_width, window_height)
+        self.setMaximumSize(window_width, window_height)  # 固定窗口大小，不允许自动扩展
         
         # 默认禁用代理 - 不在这里初始化代理系统
         from space_planning.spider.proxy_pool import set_global_proxy_enabled
+        from space_planning.core.logger_config import get_logger
+        logger = get_logger(__name__)
+        
         set_global_proxy_enabled(False)
-        print("程序默认不使用代理，可在代理设置中启用")
+        logger.info("程序默认不使用代理，可在代理设置中启用")
         
         # 创建共享的爬虫实例
         from space_planning.spider.national import NationalSpider
@@ -242,13 +71,16 @@ class MainWindow(QMainWindow):
         from space_planning.spider.mnr import MNRSpider
         from space_planning.spider.mnr_multithread import MNRMultiThreadSpider
         
+        # 从配置获取线程数
+        default_thread_count = ui_config.get('default_thread_count', 4)
+        
         # 为每个机构创建持久的爬虫实例，保持监控数据
         self.national_spider = NationalSpider()
-        self.national_multithread_spider = NationalMultiThreadSpider(max_workers=4)  # 创建多线程爬虫实例
+        self.national_multithread_spider = NationalMultiThreadSpider(max_workers=default_thread_count)
         self.guangdong_spider = GuangdongSpider()
-        self.guangdong_multithread_spider = GuangdongMultiThreadSpider(max_workers=4)  # 创建多线程爬虫实例
+        self.guangdong_multithread_spider = GuangdongMultiThreadSpider(max_workers=default_thread_count)
         self.mnr_spider = MNRSpider()
-        self.mnr_multithread_spider = MNRMultiThreadSpider(max_workers=4)  # 创建多线程爬虫实例
+        self.mnr_multithread_spider = MNRMultiThreadSpider(max_workers=default_thread_count)
         
         # 默认使用国家级爬虫
         self.spider = self.national_spider
@@ -353,9 +185,9 @@ class MainWindow(QMainWindow):
             from space_planning.spider import get_all_spider_levels
             spider_levels = get_all_spider_levels()
             self.level_combo.addItems(spider_levels)
-            print(f"动态加载的爬虫机构: {spider_levels}")
+            logger.debug(f"动态加载的爬虫机构: {spider_levels}")
         except Exception as e:
-            print(f"动态加载爬虫机构失败: {e}")
+            logger.error(f"动态加载爬虫机构失败: {e}", exc_info=True)
             # 降级方案：只显示已实现的爬虫
             self.level_combo.addItems(["住房和城乡建设部", "广东省人民政府", "自然资源部"])
         
@@ -524,17 +356,9 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         
-        # 自动调整列宽
-        header = self.table.horizontalHeader()
-        if header is not None:
-            header.setStretchLastSection(False)
-            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # 机构
-            header.setSectionResizeMode(1, QHeaderView.Stretch)  # 标题自适应
-            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # 发布日期
-            header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # 来源
-            header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # 政策类型
-            header.setSectionResizeMode(5, QHeaderView.Fixed)  # 操作列固定宽度
-        self.table.setColumnWidth(5, 100)
+        # 初始化表格配置（默认使用第一个机构的配置）
+        initial_level = self.level_combo.currentText() if hasattr(self, 'level_combo') else "住房和城乡建设部"
+        TableDisplayConfig.apply_table_config(self.table, initial_level)
         
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(True)  # 允许文字换行
@@ -629,6 +453,18 @@ class MainWindow(QMainWindow):
         
         # 存储当前数据
         self.current_data = []
+        
+        # 初始化 TableManager
+        self.table_manager = TableManager(
+            table_widget=self.table,
+            stats_label=self.stats_label,
+            page_info_label=self.page_info_label,
+            prev_page_btn=self.prev_page_btn,
+            next_page_btn=self.next_page_btn,
+            auto_scroll_checkbox=self.auto_scroll_checkbox,
+            max_display_rows=self.max_display_rows,
+            page_size=self.page_size
+        )
         # 初始化对比器
         self.comparer = PolicyComparer()
         # 初始化合规性分析器
@@ -706,6 +542,13 @@ class MainWindow(QMainWindow):
     
     def on_level_changed(self, level):
         """机构选择变化事件"""
+        # 根据选择的机构应用相应的表格显示配置
+        try:
+            TableDisplayConfig.apply_table_config(self.table, level)
+            logger.debug(f"已为机构 '{level}' 应用表格显示配置")
+        except Exception as e:
+            logger.warning(f"应用表格配置失败: {e}", exc_info=True)
+        
         # 如果当前启用了多线程，但选择的不是支持的机构，则禁用多线程
         supported_levels = ["住房和城乡建设部", "广东省人民政府", "自然资源部"]
         if self.multithread_checkbox.isChecked() and level not in supported_levels:
@@ -802,7 +645,7 @@ class MainWindow(QMainWindow):
     def update_progress(self, message):
         """更新进度显示"""
         self.progress_label.setText(message)
-        print(message)
+        logger.debug(message)
         
         # 如果消息包含"已保存"，更新统计信息
         if "已保存" in message and hasattr(self, 'current_data'):
@@ -824,16 +667,16 @@ class MainWindow(QMainWindow):
         # 检查是否是最终查询结果（爬取完成后的查询）
         # 如果是最终查询，且当前数据量大于查询结果，说明有实时爬取的数据
         if len(self.current_data) > len(results) and len(self.current_data) > 0:
-            print(f"检测到实时爬取数据，当前数据量: {len(self.current_data)}, 查询结果: {len(results)}")
-            print("保留实时爬取的数据，不覆盖")
+            logger.debug(f"检测到实时爬取数据，当前数据量: {len(self.current_data)}, 查询结果: {len(results)}")
+            logger.debug("保留实时爬取的数据，不覆盖")
             # 保留实时爬取的数据，不覆盖
             return
         
         # 如果是初始查询（没有实时数据），则正常更新
         if len(self.current_data) == 0:
-            print(f"初始查询结果: {len(results)} 条")
+            logger.debug(f"初始查询结果: {len(results)} 条")
         else:
-            print(f"更新查询结果: 当前 {len(self.current_data)} 条 -> 新结果 {len(results)} 条")
+            logger.debug(f"更新查询结果: 当前 {len(self.current_data)} 条 -> 新结果 {len(results)} 条")
         
         # 取消数据限制，显示所有结果
         self.current_data = list(results)
@@ -844,37 +687,87 @@ class MainWindow(QMainWindow):
     def on_new_policy(self, policy):
         """新增政策信号处理"""
         try:
+            logger.info(f"收到新政策信号: {type(policy)}, 键={list(policy.keys()) if isinstance(policy, dict) else 'N/A'}")
+            
+            # 检查policy格式
+            if not isinstance(policy, dict):
+                logger.error(f"政策格式错误: 期望dict，实际{type(policy)}")
+                return
+            
+            # 检查必需的字段（content是可选的，如果缺失会自动添加空字符串）
+            required_fields = ['level', 'title', 'pub_date', 'source', 'crawl_time']
+            missing_fields = [field for field in required_fields if field not in policy]
+            if missing_fields:
+                logger.warning(f"政策缺少必需字段: {missing_fields}, 可用字段: {list(policy.keys())}")
+            
+            # 确保 content 字段存在（如果缺失，添加空字符串）
+            if 'content' not in policy:
+                policy['content'] = ""
+                logger.debug(f"政策缺少 content 字段，已添加空字符串: {policy.get('title', 'N/A')[:50]}")
+            
             # 立即保存到数据库
-            db.insert_policy(
-                policy['level'], 
-                policy['title'], 
-                policy['pub_date'], 
-                policy['source'], 
-                policy['content'], 
-                policy['crawl_time'],
-                policy.get('category')  # 添加分类信息
-            )
+            try:
+                db.insert_policy(
+                    policy.get('level', ''), 
+                    policy.get('title', ''), 
+                    policy.get('pub_date', ''), 
+                    policy.get('source', ''), 
+                    policy.get('content', ''), 
+                    policy.get('crawl_time', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                    policy.get('category')  # 添加分类信息
+                )
+                logger.debug(f"政策已保存到数据库: {policy.get('title', 'N/A')[:50]}")
+            except Exception as db_error:
+                logger.error(f"保存政策到数据库失败: {db_error}", exc_info=True)
             
             # policy为dict，需转为tuple与表格结构一致
             # 注意：数据库返回的字段顺序是 (id, level, title, pub_date, source, content, category)
-            row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
+            row = (
+                None, 
+                policy.get('level', ''), 
+                policy.get('title', ''), 
+                policy.get('pub_date', ''), 
+                policy.get('source', ''), 
+                policy.get('content', ''), 
+                policy.get('category', '')
+            )
             self.current_data.append(row)
+            logger.debug(f"政策已添加到current_data，当前总数: {len(self.current_data)}")
             
             # 实时显示：每一条都立即显示
-            self._add_single_row(row)
+            try:
+                self._add_single_row(row)
+                logger.debug(f"政策已添加到表格: {policy.get('title', 'N/A')[:50]}")
+            except Exception as add_error:
+                logger.error(f"添加行到表格失败: {add_error}", exc_info=True)
+                raise
             
             # 更新统计信息
             if self.stats_label is not None:
                 self.stats_label.setText(f"共找到 {len(self.current_data)} 条政策")
             
-            # 批量更新界面，减少频繁刷新
-            self._update_ui_periodically()
+            # 对于广东省，立即更新界面，实现流动显示效果
+            if policy.get('level', '') == '广东省人民政府':
+                QApplication.processEvents()  # 立即处理界面事件，确保实时显示
+            else:
+                # 其他机构批量更新界面，减少频繁刷新
+                self._update_ui_periodically()
             
         except Exception as e:
-            print(f"保存新政策失败: {e}")
-            # 即使保存失败，也要显示在界面上
+            logger.error(f"处理新政策失败: {e}", exc_info=True)
+            import traceback
+            logger.error(f"详细错误:\n{traceback.format_exc()}")
+            # 即使保存失败，也要尝试显示在界面上
             try:
-                row = (None, policy['level'], policy['title'], policy['pub_date'], policy['source'], policy['content'], policy.get('category', ''))
+                row = (
+                    None, 
+                    policy.get('level', '') if isinstance(policy, dict) else '', 
+                    policy.get('title', '') if isinstance(policy, dict) else str(policy), 
+                    policy.get('pub_date', '') if isinstance(policy, dict) else '', 
+                    policy.get('source', '') if isinstance(policy, dict) else '', 
+                    policy.get('content', '') if isinstance(policy, dict) else '', 
+                    policy.get('category', '') if isinstance(policy, dict) else ''
+                )
                 self.current_data.append(row)
                 self._add_single_row(row)
                 
@@ -884,14 +777,14 @@ class MainWindow(QMainWindow):
                 # 减少界面刷新频率
                 self._update_ui_periodically()
             except Exception as e2:
-                print(f"显示新政策失败: {e2}")
+                logger.error(f"显示新政策失败: {e2}", exc_info=True)
 
     def on_data_count_update(self, count):
         """接收数据量更新信号"""
-        print(f"收到数据量更新信号: {count}")
+        logger.debug(f"收到数据量更新信号: {count}")
         # 如果当前数据量小于接收到的数量，说明有新的数据
         if len(self.current_data) < count:
-            print(f"数据量不匹配，当前: {len(self.current_data)}, 接收: {count}")
+            logger.debug(f"数据量不匹配，当前: {len(self.current_data)}, 接收: {count}")
             # 可以选择重新查询数据库或保持当前状态
 
     def search_finished(self):
@@ -952,138 +845,26 @@ class MainWindow(QMainWindow):
         return False
 
     def refresh_table(self, data, only_last=False):
-        """刷新表格数据（支持分页显示）"""
+        """刷新表格数据（支持分页显示）- 委托给TableManager"""
         self.current_data = data
-        
-        # 更新统计信息
-        if self.stats_label is not None:
-            self.stats_label.setText(f"共找到 {len(data)} 条政策")
-        
-        # 如果数据量很大，启用分页显示
-        if len(data) > self.max_display_rows:
-            self._show_paginated_data(data)
-        else:
-            # 数据量不大，直接显示全部
-            self.page_info_label.setVisible(False)
-            if only_last and data:
-                row = len(data) - 1
-                self.table.insertRow(row)
-                item = data[row]
-                self._set_table_row(row, item)
-            else:
-                self.table.setRowCount(len(data))
-                for row, item in enumerate(data):
-                    self._set_table_row(row, item)
-    
-    def _show_paginated_data(self, data):
-        """分页显示数据"""
-        total_pages = (len(data) + self.page_size - 1) // self.page_size
-        start_idx = self.current_page * self.page_size
-        end_idx = min(start_idx + self.page_size, len(data))
-        
-        # 显示当前页数据
-        page_data = data[start_idx:end_idx]
-        self.table.setRowCount(len(page_data))
-        for row, item in enumerate(page_data):
-            self._set_table_row(row, item)
-        
-        # 更新分页信息
-        self.page_info_label.setText(f"第 {self.current_page + 1}/{total_pages} 页 (显示第 {start_idx + 1}-{end_idx} 条，共 {len(data)} 条)")
-        self.page_info_label.setVisible(True)
-        
-        # 更新导航按钮状态
-        self.prev_page_btn.setVisible(self.current_page > 0)
-        self.next_page_btn.setVisible(self.current_page < total_pages - 1)
+        self.table_manager.current_data = data
+        self.table_manager.refresh_table(data, only_last)
     
     def prev_page(self):
-        """上一页"""
-        if self.current_page > 0:
-            self.current_page -= 1
-            self._show_paginated_data(self.current_data)
+        """上一页 - 委托给TableManager"""
+        self.table_manager.prev_page()
     
     def next_page(self):
-        """下一页"""
-        total_pages = (len(self.current_data) + self.page_size - 1) // self.page_size
-        if self.current_page < total_pages - 1:
-            self.current_page += 1
-            self._show_paginated_data(self.current_data)
+        """下一页 - 委托给TableManager"""
+        self.table_manager.next_page()
     
     def _add_single_row(self, item):
-        """添加单行数据（优化性能）"""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self._set_table_row(row, item)
-        
-        # 自动滚动到最新行
-        if self.auto_scroll_checkbox.isChecked():
-            self.table.scrollToBottom()
-            # 选中最新行
-            self.table.selectRow(row)
+        """添加单行数据（优化性能）- 委托给TableManager"""
+        self.table_manager._add_single_row(item)
     
     def _set_table_row(self, row, item):
-        """设置表格行数据"""
-        # 设置各列数据 - 数据库字段顺序：(id, level, title, pub_date, source, content)
-        
-        # 检查item是元组还是字典
-        if isinstance(item, (list, tuple)):
-            # 元组/列表格式 (id, level, title, pub_date, source, content)
-            level = str(item[1]) if len(item) > 1 else ""
-            title = str(item[2]) if len(item) > 2 else ""
-            pub_date = str(item[3]) if len(item) > 3 else ""
-            source = str(item[4]) if len(item) > 4 else ""
-            content = str(item[5]) if len(item) > 5 else ""
-            category = str(item[6]) if len(item) > 6 else ""
-        elif isinstance(item, dict):
-            # 字典格式
-            level = str(item.get('level', ''))
-            title = str(item.get('title', ''))
-            pub_date = str(item.get('pub_date', ''))
-            source = str(item.get('source', ''))
-            content = str(item.get('content', ''))
-            category = str(item.get('category', ''))
-        else:
-            # 未知格式，使用默认值
-            level = title = pub_date = source = content = category = ""
-        
-        # 机构列
-        level_item = QTableWidgetItem(level)
-        level_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(row, 0, level_item)
-        
-        # 标题列 - 支持换行
-        title_item = QTableWidgetItem(title)
-        title_item.setToolTip(title)  # 鼠标悬停显示完整标题
-        self.table.setItem(row, 1, title_item)
-        
-        # 发布日期列
-        date_item = QTableWidgetItem(pub_date)
-        date_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(row, 2, date_item)
-        
-        # 来源列 - 超链接样式
-        source_item = QTableWidgetItem(source)
-        source_item.setForeground(QColor(0, 102, 204))  # 蓝色链接样式
-        source_item.setToolTip(f"点击查看来源：{source}")
-        self.table.setItem(row, 3, source_item)
-        
-        # 政策类型列 - 优先显示实际分类
-        if category and category.strip():
-            # 使用实际的分类信息
-            type_item = QTableWidgetItem(category)
-        else:
-            # 如果分类为空，使用智能分类作为备选
-            policy_types = self.compliance_analyzer.classify_policy(title, content)
-            type_item = QTableWidgetItem(", ".join(policy_types))
-        
-        type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table.setItem(row, 4, type_item)
-        
-        # 操作列 - 按钮样式
-        action_item = QTableWidgetItem("📄 查看全文")
-        action_item.setForeground(QColor(0, 128, 0))  # 绿色按钮样式
-        action_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        action_item.setToolTip("点击查看政策全文")
-        self.table.setItem(row, 5, action_item)
+        """设置表格行数据 - 委托给TableManager处理"""
+        self.table_manager._set_table_row(row, item, self.compliance_analyzer)
 
     def on_export(self):
         """导出数据 - 支持政策选择和多种格式"""
@@ -1172,7 +953,7 @@ class MainWindow(QMainWindow):
         
         select_all_checkbox.stateChanged.connect(on_select_all_changed)
         
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.Accepted:
             selected_format = format_combo.currentText()
             selected_indices = [policy_list.row(item) for item in policy_list.selectedItems()]
             
@@ -1414,7 +1195,7 @@ class MainWindow(QMainWindow):
         
         policy_list.itemSelectionChanged.connect(analyze_selected)
         
-        dialog.exec_()
+        dialog.exec()
     
     def analyze_policies(self, policies):
         """分析政策对比结果"""
@@ -1502,7 +1283,7 @@ class MainWindow(QMainWindow):
         analysis_result = self.perform_compliance_analysis(project_keywords)
         result_text.setText(analysis_result)
         
-        dialog.exec_()
+        dialog.exec()
 
     def perform_compliance_analysis(self, project_keywords):
         """执行合规性分析"""
@@ -1762,64 +1543,68 @@ class MainWindow(QMainWindow):
             # 首先检查搜索线程中的爬虫
             if hasattr(self, 'search_thread') and self.search_thread.isRunning():
                 crawler = getattr(self.search_thread, 'spider', None)
-                print(f"从搜索线程获取爬虫: {type(crawler).__name__ if crawler else 'None'}")
+                logger.debug(f"从搜索线程获取爬虫: {type(crawler).__name__ if crawler else 'None'}")
             
             # 如果没有找到爬虫，根据当前选择的机构和模式确定爬虫
             if crawler is None:
                 current_level = self.level_combo.currentText()
                 use_multithread = self.multithread_checkbox.isChecked()
                 
-                print(f"当前机构: {current_level}, 多线程模式: {use_multithread}")
+                logger.debug(f"当前机构: {current_level}, 多线程模式: {use_multithread}")
                 
                 if current_level == "自然资源部":
                     if use_multithread:
                         crawler = self.mnr_multithread_spider
-                        print("使用自然资源部多线程爬虫")
+                        logger.debug("使用自然资源部多线程爬虫")
                     else:
                         crawler = self.mnr_spider
-                        print("使用自然资源部单线程爬虫")
+                        logger.debug("使用自然资源部单线程爬虫")
                 elif current_level == "广东省人民政府":
                     if use_multithread:
                         crawler = self.guangdong_multithread_spider
-                        print("使用广东省多线程爬虫")
+                        logger.debug("使用广东省多线程爬虫")
                     else:
                         crawler = self.guangdong_spider
-                        print("使用广东省单线程爬虫")
+                        logger.debug("使用广东省单线程爬虫")
                 elif current_level == "住房和城乡建设部":
                     if use_multithread:
                         crawler = self.national_multithread_spider
-                        print("使用国家级多线程爬虫")
+                        logger.debug("使用国家级多线程爬虫")
                     else:
                         crawler = self.national_spider
-                        print("使用国家级单线程爬虫")
+                        logger.debug("使用国家级单线程爬虫")
                 else:
                     # 默认使用国家级爬虫
                     crawler = self.national_spider
-                    print("使用默认国家级爬虫")
+                    logger.debug("使用默认国家级爬虫")
             
             # 如果还是没有爬虫，创建一个默认的
             if crawler is None:
                 from space_planning.spider.national import NationalSpider
                 crawler = NationalSpider()
-                print("创建默认爬虫实例")
+                logger.debug("创建默认爬虫实例")
                 
         except Exception as e:
-            print(f"获取爬虫实例失败: {e}")
+            logger.error(f"获取爬虫实例失败: {e}", exc_info=True)
             # 创建一个默认爬虫
             from space_planning.spider.national import NationalSpider
             crawler = NationalSpider()
         
-        print(f"最终使用的爬虫类型: {type(crawler).__name__}")
+        logger.debug(f"最终使用的爬虫类型: {type(crawler).__name__}")
         
-        self.crawler_status_dialog = CrawlerStatusDialog(crawler, self)
-        self.crawler_status_dialog.show()
+        try:
+            self.crawler_status_dialog = CrawlerStatusDialog(crawler, self)
+            self.crawler_status_dialog.show()
+        except Exception as e:
+            logger.error(f"创建爬虫状态对话框失败: {e}", exc_info=True)
+            QMessageBox.warning(self, "错误", f"无法打开爬虫状态对话框：{str(e)[:100]}")
     
     def show_database_manager(self):
         """显示数据库管理对话框"""
         try:
             from .database_manager_dialog import DatabaseManagerDialog
             dialog = DatabaseManagerDialog(self)
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"打开数据库管理失败: {str(e)}")
     
@@ -1831,7 +1616,7 @@ class MainWindow(QMainWindow):
             from .crawler_settings_dialog import CrawlerSettingsDialog
             dialog = CrawlerSettingsDialog(self)
             dialog.settings_changed.connect(self.on_settings_changed)
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"无法打开爬虫设置对话框：{e}")
     
@@ -1840,7 +1625,7 @@ class MainWindow(QMainWindow):
         try:
             from .proxy_settings_dialog import ProxySettingsDialog
             dialog = ProxySettingsDialog(self)
-            if dialog.exec_() == QDialog.Accepted:
+            if dialog.exec() == QDialog.Accepted:
                 # 代理设置已在对话框中更新并初始化
                 QMessageBox.information(self, "成功", "代理设置已更新")
         except Exception as e:
@@ -1984,30 +1769,31 @@ class MainWindow(QMainWindow):
                     "代理已清空！\n\n下次爬取时会自动获取新的代理。"
                 )
                 
-                print("用户手动清空代理")
+                logger.info("用户手动清空代理")
                 
         except Exception as e:
             QMessageBox.critical(self, "错误", f"清空代理失败: {str(e)}")
-            print(f"手动清空代理失败: {e}")
+            logger.error(f"手动清空代理失败: {e}", exc_info=True)
 
 def main():
     """主程序入口函数"""
+    from space_planning.core.logger_config import get_logger
+    logger = get_logger(__name__)
+    
     try:
-        print("正在初始化数据库...")
+        logger.info("正在初始化数据库...")
         db.init_db()  # 初始化数据库
-        print("数据库初始化完成")
+        logger.info("数据库初始化完成")
         
-        print("正在启动应用程序...")
+        logger.info("正在启动应用程序...")
         app = QApplication(sys.argv)
         window = MainWindow()
         window.show()
-        print("应用程序启动成功")
+        logger.info("应用程序启动成功")
         
-        sys.exit(app.exec_())
+        sys.exit(app.exec())
     except Exception as e:
-        print(f"程序启动失败: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.critical(f"程序启动失败: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -13,6 +13,9 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from ..spider.national import NationalSpider
+import logging
+
+logger = logging.getLogger(__name__)
 
 class StatusUpdateThread(QThread):
     """状态更新线程"""
@@ -197,8 +200,15 @@ class CrawlerStatusDialog(QDialog):
     def __init__(self, crawler, parent=None):
         super().__init__(parent)
         self.crawler = crawler
-        self.setup_ui()
-        self.start_monitoring()
+        self.is_closing = False  # 标记对话框是否正在关闭
+        try:
+            self.setup_ui()
+            # 延迟启动监控，确保UI已完全初始化
+            QTimer.singleShot(500, self.start_monitoring)  # 增加到500ms，确保UI完全初始化
+        except Exception as e:
+            logger.error(f"初始化爬虫状态对话框失败: {e}", exc_info=True)
+            # 即使初始化失败，也要显示对话框，但提示错误
+            QMessageBox.warning(self, "错误", f"初始化失败: {str(e)[:100]}")
     
     def setup_ui(self):
         """初始化UI"""
@@ -279,90 +289,157 @@ class CrawlerStatusDialog(QDialog):
         
     def start_monitoring(self):
         """开始监控"""
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_status)
-        self.timer.start(1000)  # 每秒更新一次
+        try:
+            if self.is_closing:
+                return
+            self.timer = QTimer()
+            self.timer.timeout.connect(self.update_status)
+            self.timer.start(1000)  # 每秒更新一次
+        except Exception as e:
+            logger.error(f"启动监控失败: {e}", exc_info=True)
+            # 即使启动失败也不抛出异常，避免崩溃
     
     def update_status(self):
         """更新状态显示"""
-        if not self.crawler:
+        # 首先检查对话框是否正在关闭或已关闭
+        if self.is_closing:
             return
         
         try:
-            # 尝试获取爬虫统计信息
-            stats = self._get_crawler_stats()
+            if not self.isVisible():
+                logger.debug("对话框已关闭，停止状态更新")
+                self.is_closing = True
+                return
+        except (RuntimeError, AttributeError, Exception):
+            # 对话框可能正在被销毁
+            self.is_closing = True
+            return
+        
+        if not self.crawler:
+            logger.debug("爬虫实例为空，无法更新状态")
+            return
+        
+        try:
+            # 检查UI组件是否已初始化
+            if not hasattr(self, 'total_label') or not hasattr(self, 'proxy_status'):
+                logger.warning("UI组件未完全初始化，跳过状态更新")
+                return
+            
+            # 尝试获取爬虫统计信息（使用线程安全的方式）
+            try:
+                stats = self._get_crawler_stats()
+            except Exception as stats_error:
+                logger.error(f"获取爬虫统计信息时出错: {stats_error}", exc_info=True)
+                # 即使出错也尝试显示错误信息
+                try:
+                    if hasattr(self, 'total_label'):
+                        error_msg = str(stats_error)[:50]
+                        self.total_label.setText(f"状态获取失败: {error_msg}")
+                except Exception:
+                    pass
+                return
+            
+            if not stats:
+                logger.warning("无法获取爬虫统计信息")
+                return
+            
             session = self._get_session_info()
             
             # 更新代理状态
-            proxy_info = self._extract_proxy_info(stats, session)
-            self.proxy_status.update_status(proxy_info)
+            try:
+                proxy_info = self._extract_proxy_info(stats, session)
+                if hasattr(self, 'proxy_status'):
+                    self.proxy_status.update_status(proxy_info)
+            except Exception as proxy_error:
+                logger.error(f"更新代理状态失败: {proxy_error}", exc_info=True)
             
             # 更新重试配置
-            self._update_retry_config(stats)
+            try:
+                self._update_retry_config(stats)
+            except Exception as retry_error:
+                logger.error(f"更新重试配置失败: {retry_error}", exc_info=True)
             
             # 更新进度和统计信息
-            self._update_progress_and_stats(stats)
+            try:
+                self._update_progress_and_stats(stats)
+            except Exception as progress_error:
+                logger.error(f"更新进度和统计信息失败: {progress_error}", exc_info=True)
             
         except Exception as e:
-            print(f"更新状态失败: {e}")
-            # 显示错误信息
-            self.total_label.setText(f"状态更新失败: {str(e)}")
-            self.success_label.setText("")
-            self.failed_label.setText("")
-            self.success_rate_label.setText("")
+            logger.error(f"更新状态失败: {e}", exc_info=True)
+            # 安全地显示错误信息
+            try:
+                if hasattr(self, 'total_label'):
+                    error_msg = str(e)[:50]  # 限制错误消息长度
+                    self.total_label.setText(f"状态更新失败: {error_msg}")
+                    if hasattr(self, 'success_label'):
+                        self.success_label.setText("")
+                    if hasattr(self, 'failed_label'):
+                        self.failed_label.setText("")
+                    if hasattr(self, 'success_rate_label'):
+                        self.success_rate_label.setText("")
+            except Exception as ui_error:
+                logger.error(f"显示错误信息失败: {ui_error}", exc_info=True)
     
     def _get_crawler_stats(self):
         """安全获取爬虫统计信息"""
+        if not self.crawler:
+            logger.debug("爬虫实例为空")
+            return {
+                'total_pages': 0,
+                'successful_pages': 0,
+                'failed_pages': 0,
+                'proxy_enabled': False
+            }
+        
         try:
-            # 首先尝试获取多线程爬虫的状态
-            if hasattr(self.crawler, 'get_crawler_status'):
-                status = self.crawler.get_crawler_status()
-                
-                # 如果是多线程爬虫，提取统计信息
-                if 'multithread_stats' in status:
-                    multithread_stats = status['multithread_stats']
-                    proxy_stats = status.get('proxy_stats', {})
-                    
-                    # 转换为标准格式
-                    return {
-                        'total_pages': multithread_stats.get('total_tasks', 0),
-                        'successful_pages': multithread_stats.get('completed_tasks', 0),
-                        'failed_pages': multithread_stats.get('failed_tasks', 0),
-                        'proxy_enabled': status.get('enable_proxy', False),
-                        'proxy_status': {
-                            'enabled': status.get('enable_proxy', False),
-                            'current_proxy': proxy_stats.get('current_proxy'),
-                            'proxy_details': proxy_stats.get('proxy_details', [])
-                        },
-                        'multithread_info': {
-                            'active_threads': multithread_stats.get('active_threads', 0),
-                            'total_crawled': multithread_stats.get('total_crawled', 0),
-                            'total_saved': multithread_stats.get('total_saved', 0),
-                            'elapsed_time': multithread_stats.get('elapsed_time', 0)
-                        },
-                        'level': status.get('level', '未知'),
-                        'speed_mode': status.get('speed_mode', '正常速度'),
-                        'categories': status.get('categories', [])
-                    }
-                else:
-                    # 普通爬虫状态
-                    return status
+            # 使用最安全的方式获取状态，无论爬虫是否在运行
+            # 在运行时访问状态可能引发各种异常，所以我们统一使用安全方法
+            status = self._safe_get_status()
             
-            # 尝试不同的方法名
-            elif hasattr(self.crawler, 'get_crawling_stats'):
-                return self.crawler.get_crawling_stats()
-            elif hasattr(self.crawler, 'get_stats'):
-                return self.crawler.get_stats()
-            else:
-                # 返回默认统计信息
+            # 如果安全方法返回了有效的状态，继续处理
+            if not isinstance(status, dict):
+                logger.warning(f"安全获取状态返回非字典类型: {type(status)}")
+                status = {}
+            
+            # 如果是多线程爬虫，提取统计信息
+            if 'multithread_stats' in status:
+                multithread_stats = status.get('multithread_stats', {})
+                proxy_stats = status.get('proxy_stats', {})
+                
+                # 转换为标准格式
                 return {
-                    'total_pages': 0,
-                    'successful_pages': 0,
-                    'failed_pages': 0,
-                    'proxy_enabled': False
+                    'total_pages': multithread_stats.get('total_tasks', 0),
+                    'successful_pages': multithread_stats.get('completed_tasks', 0),
+                    'failed_pages': multithread_stats.get('failed_tasks', 0),
+                    'proxy_enabled': status.get('enable_proxy', False),
+                    'proxy_status': {
+                        'enabled': status.get('enable_proxy', False),
+                        'current_proxy': proxy_stats.get('current_proxy'),
+                        'proxy_details': proxy_stats.get('proxy_details', [])
+                    },
+                    'multithread_info': {
+                        'active_threads': multithread_stats.get('active_threads', 0),
+                        'total_crawled': multithread_stats.get('total_crawled', 0),
+                        'total_saved': multithread_stats.get('total_saved', 0),
+                        'elapsed_time': multithread_stats.get('elapsed_time', 0)
+                    },
+                    'level': status.get('level', '未知'),
+                    'speed_mode': status.get('speed_mode', '正常速度'),
+                    'categories': status.get('categories', [])
                 }
+            else:
+                # 普通爬虫状态，确保返回字典
+                if not isinstance(status, dict):
+                    status = {}
+                # 确保有必需的字段
+                status.setdefault('total_pages', status.get('total_pages', 0))
+                status.setdefault('successful_pages', status.get('successful_pages', 0))
+                status.setdefault('failed_pages', status.get('failed_pages', 0))
+                status.setdefault('proxy_enabled', False)
+                return status
         except Exception as e:
-            print(f"获取爬虫统计失败: {e}")
+            logger.error(f"获取爬虫统计失败: {e}", exc_info=True)
             return {
                 'total_pages': 0,
                 'successful_pages': 0,
@@ -378,28 +455,54 @@ class CrawlerStatusDialog(QDialog):
             else:
                 return {}
         except Exception as e:
-            print(f"获取会话信息失败: {e}")
+            logger.error(f"获取会话信息失败: {e}", exc_info=True)
             return {}
     
     def _extract_proxy_info(self, stats, session):
         """提取代理信息"""
+        if not isinstance(stats, dict):
+            logger.warning(f"stats不是字典类型: {type(stats)}")
+            return None
+        
+        if not isinstance(session, dict):
+            session = {}
+        
         try:
             # 首先检查stats中是否有proxy_status
             if 'proxy_status' in stats:
-                proxy_status = stats['proxy_status']
+                proxy_status = stats.get('proxy_status', {})
+                if not isinstance(proxy_status, dict):
+                    proxy_status = {}
+                
                 proxy_enabled = proxy_status.get('enabled', False)
                 
-                if proxy_enabled and proxy_status.get('current_proxy'):
-                    current_proxy_info = proxy_status['current_proxy']
-                    return {
-                        'enabled': True,
-                        'current_proxy': f"{current_proxy_info['ip']}:{current_proxy_info['port']}",
-                        'score': current_proxy_info.get('success_rate', 0) * 100,  # 转换为百分比
-                        'response_time': None,  # 持久化代理管理器不提供响应时间
-                        'usage_count': current_proxy_info.get('use_count', 0),
-                        'retry_count': current_proxy_info.get('consecutive_failures', 0)
-                    }
-                elif proxy_enabled:
+                if proxy_enabled:
+                    current_proxy_info = proxy_status.get('current_proxy')
+                    if current_proxy_info:
+                        # 处理不同的current_proxy格式
+                        if isinstance(current_proxy_info, dict):
+                            ip = current_proxy_info.get('ip', '')
+                            port = current_proxy_info.get('port', '')
+                            if ip and port:
+                                return {
+                                    'enabled': True,
+                                    'current_proxy': f"{ip}:{port}",
+                                    'score': current_proxy_info.get('success_rate', 0) * 100,  # 转换为百分比
+                                    'response_time': current_proxy_info.get('response_time'),
+                                    'usage_count': current_proxy_info.get('use_count', 0),
+                                    'retry_count': current_proxy_info.get('consecutive_failures', 0)
+                                }
+                        elif isinstance(current_proxy_info, str):
+                            # 如果是字符串格式 ip:port
+                            return {
+                                'enabled': True,
+                                'current_proxy': current_proxy_info,
+                                'score': 0,
+                                'response_time': None,
+                                'usage_count': 0,
+                                'retry_count': 0
+                            }
+                    
                     # 代理已启用但没有当前代理
                     return {
                         'enabled': True,
@@ -420,47 +523,87 @@ class CrawlerStatusDialog(QDialog):
                 return None
             
             # 获取当前代理信息
-            current_proxy = session.get('current_proxy')
+            current_proxy = session.get('current_proxy') if isinstance(session, dict) else None
             proxy_stats = stats.get('proxy_stats', {})
+            if not isinstance(proxy_stats, dict):
+                proxy_stats = {}
+            
             proxy_details = proxy_stats.get('proxy_details', [])
+            if not isinstance(proxy_details, list):
+                proxy_details = []
             
             # 查找当前代理的详细信息
             current_proxy_detail = None
             if current_proxy and proxy_details:
-                current_proxy_ip = current_proxy.split(':')[0]
-                for detail in proxy_details:
-                    if detail.get('ip') == current_proxy_ip:
-                        current_proxy_detail = detail
-                        break
+                try:
+                    current_proxy_ip = str(current_proxy).split(':')[0]
+                    for detail in proxy_details:
+                        if isinstance(detail, dict) and detail.get('ip') == current_proxy_ip:
+                            current_proxy_detail = detail
+                            break
+                except Exception:
+                    pass
             
             return {
                 'enabled': True,
                 'current_proxy': current_proxy or "等待获取",
                 'score': current_proxy_detail.get('score', 0) if current_proxy_detail else 0,
                 'response_time': current_proxy_detail.get('avg_response_time') if current_proxy_detail else None,
-                'usage_count': session.get('proxy_usage_count', 0),
-                'retry_count': session.get('retry_count', 0)
+                'usage_count': session.get('proxy_usage_count', 0) if isinstance(session, dict) else 0,
+                'retry_count': session.get('retry_count', 0) if isinstance(session, dict) else 0
             }
         except Exception as e:
-            print(f"提取代理信息失败: {e}")
+            logger.error(f"提取代理信息失败: {e}", exc_info=True)
             return None
     
     def _update_retry_config(self, stats):
         """更新重试配置显示"""
         try:
+            if not isinstance(stats, dict):
+                stats = {}
+            
             retry_stats = stats.get('retry_stats', {})
-            self.max_retries_label.setText(f"最大重试次数: {retry_stats.get('max_retries', 3)}")
-            self.retry_delay_label.setText(
-                f"重试延迟: {retry_stats.get('retry_delay', 5)}秒 - "
-                f"{retry_stats.get('max_retry_delay', 60)}秒"
-            )
-            retry_codes = retry_stats.get('retry_codes', [])
-            self.retry_codes_label.setText(f"重试状态码: {', '.join(map(str, retry_codes))}")
+            if not isinstance(retry_stats, dict):
+                retry_stats = {}
+            
+            # 安全设置文本
+            if hasattr(self, 'max_retries_label'):
+                try:
+                    self.max_retries_label.setText(f"最大重试次数: {retry_stats.get('max_retries', 3)}")
+                except Exception:
+                    pass
+            
+            if hasattr(self, 'retry_delay_label'):
+                try:
+                    retry_delay = retry_stats.get('retry_delay', 5)
+                    max_retry_delay = retry_stats.get('max_retry_delay', 60)
+                    self.retry_delay_label.setText(
+                        f"重试延迟: {retry_delay}秒 - {max_retry_delay}秒"
+                    )
+                except Exception:
+                    pass
+            
+            if hasattr(self, 'retry_codes_label'):
+                try:
+                    retry_codes = retry_stats.get('retry_codes', [])
+                    if isinstance(retry_codes, (list, tuple)):
+                        codes_str = ', '.join(map(str, retry_codes))
+                    else:
+                        codes_str = str(retry_codes) if retry_codes else "未知"
+                    self.retry_codes_label.setText(f"重试状态码: {codes_str}")
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"更新重试配置失败: {e}")
-            self.max_retries_label.setText("最大重试次数: 未知")
-            self.retry_delay_label.setText("重试延迟: 未知")
-            self.retry_codes_label.setText("重试状态码: 未知")
+            logger.error(f"更新重试配置失败: {e}", exc_info=True)
+            try:
+                if hasattr(self, 'max_retries_label'):
+                    self.max_retries_label.setText("最大重试次数: 未知")
+                if hasattr(self, 'retry_delay_label'):
+                    self.retry_delay_label.setText("重试延迟: 未知")
+                if hasattr(self, 'retry_codes_label'):
+                    self.retry_codes_label.setText("重试状态码: 未知")
+            except Exception:
+                pass
     
     def _update_progress_and_stats(self, stats):
         """更新进度和统计信息"""
@@ -491,37 +634,120 @@ class CrawlerStatusDialog(QDialog):
             
             # 显示多线程特定信息
             if 'multithread_info' in stats:
-                multithread_info = stats['multithread_info']
-                active_threads = multithread_info.get('active_threads', 0)
-                total_crawled = multithread_info.get('total_crawled', 0)
-                total_saved = multithread_info.get('total_saved', 0)
-                elapsed_time = multithread_info.get('elapsed_time', 0)
-                
-                # 更新多线程信息显示
-                if hasattr(self, 'multithread_label'):
-                    self.multithread_label.setText(f"活跃线程: {active_threads}")
-                if hasattr(self, 'crawled_label'):
-                    self.crawled_label.setText(f"已爬取: {total_crawled}")
-                if hasattr(self, 'saved_label'):
-                    self.saved_label.setText(f"已保存: {total_saved}")
-                if hasattr(self, 'elapsed_label'):
-                    self.elapsed_label.setText(f"耗时: {elapsed_time:.1f}秒")
+                try:
+                    multithread_info = stats.get('multithread_info', {})
+                    if not isinstance(multithread_info, dict):
+                        multithread_info = {}
+                    
+                    active_threads = multithread_info.get('active_threads', 0)
+                    total_crawled = multithread_info.get('total_crawled', 0)
+                    total_saved = multithread_info.get('total_saved', 0)
+                    elapsed_time = multithread_info.get('elapsed_time', 0)
+                    
+                    # 更新多线程信息显示（安全地）
+                    if hasattr(self, 'multithread_label'):
+                        try:
+                            self.multithread_label.setText(f"活跃线程: {active_threads}")
+                        except Exception:
+                            pass
+                    if hasattr(self, 'crawled_label'):
+                        try:
+                            self.crawled_label.setText(f"已爬取: {total_crawled}")
+                        except Exception:
+                            pass
+                    if hasattr(self, 'saved_label'):
+                        try:
+                            self.saved_label.setText(f"已保存: {total_saved}")
+                        except Exception:
+                            pass
+                    if hasattr(self, 'elapsed_label'):
+                        try:
+                            self.elapsed_label.setText(f"耗时: {elapsed_time:.1f}秒")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.error(f"更新多线程信息失败: {e}", exc_info=True)
             
             # 显示爬虫级别和模式信息
-            if 'level' in stats:
-                level = stats['level']
-                speed_mode = stats.get('speed_mode', '正常速度')
-                if hasattr(self, 'level_label'):
-                    self.level_label.setText(f"爬虫级别: {level}")
-                if hasattr(self, 'mode_label'):
-                    self.mode_label.setText(f"速度模式: {speed_mode}")
+            try:
+                if 'level' in stats:
+                    level = stats.get('level', '未知')
+                    speed_mode = stats.get('speed_mode', '正常速度')
+                    if hasattr(self, 'level_label'):
+                        try:
+                            self.level_label.setText(f"爬虫级别: {level}")
+                        except Exception:
+                            pass
+                    if hasattr(self, 'mode_label'):
+                        try:
+                            self.mode_label.setText(f"速度模式: {speed_mode}")
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.error(f"更新爬虫级别和模式信息失败: {e}", exc_info=True)
             
         except Exception as e:
-            print(f"更新进度和统计信息失败: {e}")
+            logger.error(f"更新进度和统计信息失败: {e}", exc_info=True)
             self.total_label.setText("统计信息更新失败")
             self.success_label.setText("")
             self.failed_label.setText("")
             self.success_rate_label.setText("")
+    
+    def _safe_get_status(self):
+        """安全获取爬虫状态（在爬虫运行时使用，捕获所有可能的异常）"""
+        # 默认返回值
+        default_status = {
+            'total_pages': 0,
+            'successful_pages': 0,
+            'failed_pages': 0,
+            'proxy_enabled': False,
+            'is_running': False,
+            'level': '未知',
+            'speed_mode': '正常速度'
+        }
+        
+        if not self.crawler:
+            return default_status
+        
+        # 方法1: 尝试使用 get_crawler_status 方法
+        if hasattr(self.crawler, 'get_crawler_status'):
+            try:
+                status = self.crawler.get_crawler_status()
+                if isinstance(status, dict):
+                    return status
+            except Exception as e:
+                logger.debug(f"get_crawler_status失败: {e}，尝试其他方法")
+        
+        # 方法2: 尝试使用 get_crawling_stats 方法
+        if hasattr(self.crawler, 'get_crawling_stats'):
+            try:
+                status = self.crawler.get_crawling_stats()
+                if isinstance(status, dict):
+                    return status
+            except Exception as e:
+                logger.debug(f"get_crawling_stats失败: {e}")
+        
+        # 方法3: 尝试使用 get_stats 方法
+        if hasattr(self.crawler, 'get_stats'):
+            try:
+                status = self.crawler.get_stats()
+                if isinstance(status, dict):
+                    return status
+            except Exception as e:
+                logger.debug(f"get_stats失败: {e}")
+        
+        # 方法4: 安全地直接访问属性（最不安全，但作为最后的尝试）
+        try:
+            default_status.update({
+                'proxy_enabled': getattr(self.crawler, 'enable_proxy', False),
+                'is_running': getattr(self.crawler, 'is_running', False),
+                'level': getattr(self.crawler, 'level', '未知'),
+                'speed_mode': getattr(self.crawler, 'speed_mode', '正常速度')
+            })
+        except Exception as e:
+            logger.debug(f"直接访问属性失败: {e}")
+        
+        return default_status
     
     def stop_crawler(self):
         """停止爬虫"""
@@ -530,11 +756,28 @@ class CrawlerStatusDialog(QDialog):
                 if hasattr(self.crawler, 'stop_crawling'):
                     self.crawler.stop_crawling()
             except Exception as e:
-                print(f"停止爬虫失败: {e}")
+                logger.error(f"停止爬虫失败: {e}", exc_info=True)
             self.close()
     
     def closeEvent(self, event):
         """关闭事件"""
-        if hasattr(self, 'timer'):
-            self.timer.stop()
-        super().closeEvent(event) 
+        # 标记正在关闭，停止所有更新
+        self.is_closing = True
+        
+        try:
+            if hasattr(self, 'timer'):
+                self.timer.stop()
+                self.timer = None
+        except Exception as e:
+            logger.debug(f"停止定时器失败: {e}")
+        
+        try:
+            # 清空爬虫引用，避免后续访问
+            self.crawler = None
+        except Exception:
+            pass
+        
+        try:
+            super().closeEvent(event)
+        except Exception as e:
+            logger.debug(f"关闭对话框时出现异常: {e}") 

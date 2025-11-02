@@ -4,6 +4,7 @@ import time
 import random
 import sys
 import os
+import logging
 from typing import Dict, Optional
 
 # 添加路径以便导入模块
@@ -14,49 +15,45 @@ sys.path.insert(0, parent_dir)
 from core import database as db
 from .anti_crawler import AntiCrawlerManager
 from .monitor import CrawlerMonitor
+from .spider_config import SpiderConfig
 from bs4 import BeautifulSoup, Tag
+from ..core.exceptions import (
+    NetworkError,
+    ConnectionTimeoutError,
+    HTTPError,
+    ParseError
+)
+
+logger = logging.getLogger(__name__)
 
 # 机构名称常量
 LEVEL_NAME = "住房和城乡建设部"
 
 class NationalSpider:
     def __init__(self):
-        self.api_url = "https://www.mohurd.gov.cn/api-gateway/jpaas-publish-server/front/page/build/unit"
+        # 从配置获取参数
+        config = SpiderConfig.get_national_config()
         
-        # 设置级别
-        self.level = "住房和城乡建设部"
+        self.api_url = config['api_url']
+        self.level = config['level']
+        self.base_url = config['base_url']
+        self.base_params = config['base_params'].copy()
+        self.speed_mode = config['default_speed_mode']
         
         # 初始化防反爬虫管理器
         self.anti_crawler = AntiCrawlerManager()
         self.monitor = CrawlerMonitor()
         
-        # 速度模式配置
-        self.speed_mode = "正常速度"
-        
-        # 基础参数
-        self.base_params = {
-            'webId': '86ca573ec4df405db627fdc2493677f3',
-            'pageId': 'vhiC3JxmPC8o7Lqg4Jw0E',
-            'parseType': 'bulidstatic',
-            'pageType': 'column',
-            'tagId': '内容1',
-            'tplSetId': 'fc259c381af3496d85e61997ea7771cb',
-            'unitUrl': '/api-gateway/jpaas-publish-server/front/page/build/unit'
-        }
-        
         # 设置特定的请求头（住建部网站需要）
-        self.special_headers = {
-            'Accept': '*/*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
+        self.special_headers = config['headers'].copy()
+        self.special_headers.update({
             'Connection': 'keep-alive',
-            'Referer': 'https://www.mohurd.gov.cn/gongkai/zc/wjk/index.html',
             'Sec-Fetch-Dest': 'empty',
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin',
             'X-KL-SaaS-Ajax-Request': 'Ajax_Request',
             'X-Requested-With': 'XMLHttpRequest'
-        }
+        })
     
     def _ensure_proxy_initialized(self):
         """确保代理系统已初始化（在每次请求前调用）"""
@@ -81,18 +78,18 @@ class NationalSpider:
             config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
             if os.path.exists(config_file):
                 if initialize_proxy_pool(config_file):
-                    print("NationalSpider: 代理池已初始化")
+                    logger.info("NationalSpider: 代理池已初始化")
                     return True
                 else:
-                    print("NationalSpider: 代理池初始化失败（可能配置未启用）")
+                    logger.warning("NationalSpider: 代理池初始化失败（可能配置未启用）")
             else:
-                print(f"NationalSpider: 代理配置文件不存在: {config_file}")
+                logger.debug(f"NationalSpider: 代理配置文件不存在: {config_file}")
         except Exception as e:
-            print(f"NationalSpider: 代理初始化失败: {e}")
+            logger.error(f"NationalSpider: 代理初始化失败: {e}", exc_info=True)
         
         return False
 
-    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
+    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, policy_callback=None):
         """
         通过API获取住建部政策文件，基于时间区间过滤
         Args:
@@ -102,7 +99,11 @@ class NationalSpider:
             end_date: 结束日期（yyyy-MM-dd）
             speed_mode: 速度模式（"快速模式"、"正常速度"、"慢速模式"）
             disable_speed_limit: 是否禁用速度限制
+            stop_callback: 停止回调函数
+            policy_callback: 政策数据回调函数，每解析到一条政策时调用
         """
+        logger.info(f"NationalSpider.crawl_policies 开始执行: keywords={keywords}, start_date={start_date}, end_date={end_date}, speed_mode={speed_mode}")
+        
         # 设置速度模式
         self.speed_mode = speed_mode
         
@@ -126,24 +127,30 @@ class NationalSpider:
             self.anti_crawler.max_requests_per_minute = 60
         
         policies = []
-        page_size = 30
+        # 从通用配置获取页面大小
+        common_config = SpiderConfig.get_common_config()
+        page_size = common_config['page_size']
+        
         page_no = 1
         total_processed = 0
         
         # 时间区间状态跟踪
         dt_start = datetime.strptime(start_date, '%Y-%m-%d') if start_date else None
         dt_end = datetime.strptime(end_date, '%Y-%m-%d') if end_date else None
+        # 从通用配置获取参数
+        common_config = SpiderConfig.get_common_config()
+        max_consecutive_out_of_range = common_config['max_consecutive_out_of_range']
+        
         in_target_range = False  # 是否已进入目标时间区间
         consecutive_out_of_range = 0  # 连续超出范围的页数
-        max_consecutive_out_of_range = 5  # 最大连续超出范围页数
         
         while True:
             # 检查是否停止
             if stop_callback and stop_callback():
-                print("用户已停止爬取")
+                logger.info("用户已停止爬取")
                 break
                 
-            print(f"正在检索第 {page_no} 页...")
+            logger.debug(f"正在检索第 {page_no} 页...")
             if callback:
                 callback(f"正在检索第 {page_no} 页...")
             
@@ -170,33 +177,41 @@ class NationalSpider:
                 
                 # 使用防反爬虫管理器发送请求（已集成代理支持）
                 try:
+                    logger.debug(f"正在请求第 {page_no} 页: {self.api_url}")
                     resp = self.anti_crawler.make_request(
                         self.api_url, 
                         method='GET',
                         params=params, 
                         headers=headers
                     )
+                    logger.debug(f"第 {page_no} 页请求成功，状态码: {resp.status_code}")
                     data = resp.json()
+                    logger.debug(f"第 {page_no} 页响应数据: data键存在={('data' in data)}, data类型={type(data.get('data'))}")
                     self.monitor.record_request(self.api_url, success=True)
                 except Exception as e:
+                    logger.error(f"第 {page_no} 页请求失败: {e}", exc_info=True)
                     self.monitor.record_request(self.api_url, success=False, error_type=str(e))
                     raise
+                
                 html_content = data.get('data', {}).get('html', '')
                 if not html_content:
-                    print(f"第 {page_no} 页无HTML内容，停止检索")
+                    logger.warning(f"第 {page_no} 页无HTML内容，响应数据结构: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                    logger.warning(f"第 {page_no} 页 data['data'] 内容: {data.get('data')}")
+                    logger.info(f"第 {page_no} 页无HTML内容，停止检索，已获取 {len(policies)} 条政策")
                     return policies
                 
                 soup = BeautifulSoup(html_content, 'html.parser')
                 table = soup.find('table')
                 if not isinstance(table, Tag):
-                    print(f"第 {page_no} 页未找到表格，停止检索")
+                    logger.warning(f"第 {page_no} 页未找到表格，HTML长度: {len(html_content)}, 停止检索")
+                    logger.debug(f"第 {page_no} 页HTML前500字符: {html_content[:500]}")
                     return policies
                 tbody = table.find('tbody')
                 if not isinstance(tbody, Tag):
-                    print(f"第 {page_no} 页未找到tbody，停止检索")
+                    logger.warning(f"第 {page_no} 页未找到tbody，停止检索")
                     return policies
                 rows = tbody.find_all('tr')
-                print(f"第 {page_no} 页找到 {len(rows)} 条政策")
+                logger.debug(f"第 {page_no} 页找到 {len(rows)} 条政策")
                 page_policies = []
                 page_dates = []
                 
@@ -205,7 +220,7 @@ class NationalSpider:
                         continue
                     # 检查是否停止
                     if stop_callback and stop_callback():
-                        print("用户已停止爬取")
+                        logger.info("用户已停止爬取")
                         break
                         
                     cells = row.find_all('td') if hasattr(row, 'find_all') else []
@@ -216,16 +231,38 @@ class NationalSpider:
                         title_link = None
                         if isinstance(title_cell, Tag):
                             title_link = title_cell.find('a')
-                        if title_link and isinstance(title_link, Tag):
-                            title = title_link.get('title', '') or title_link.get_text(strip=True)
-                            url = title_link.get('href', '')
-                        else:
-                            title = ''
-                            url = ''
-                        doc_number = cells_list[2].get_text(strip=True) if len(cells_list) > 2 and isinstance(cells_list[2], Tag) else ''
-                        pub_date = cells_list[3].get_text(strip=True) if len(cells_list) > 3 and isinstance(cells_list[3], Tag) else ''
-                        if isinstance(url, str) and not url.startswith('http'):
-                            url = 'https://www.mohurd.gov.cn' + url
+                            if title_link and isinstance(title_link, Tag):
+                                title = title_link.get('title', '') or title_link.get_text(strip=True)
+                                url = title_link.get('href', '')
+                            else:
+                                title = ''
+                                url = ''
+                            
+                            # 验证标题和URL有效性
+                            if not title or not title.strip() or len(title.strip()) < 3:
+                                continue
+                            if not url or not isinstance(url, str) or not url.strip():
+                                continue
+                            
+                            url = url.strip()
+                            # 过滤明显无效的URL
+                            if url == '表格没有内容' or url == '无' or url.lower() == 'none' or len(url) < 5:
+                                logger.debug(f"跳过无效URL: {url} (标题: {title[:30]})")
+                                continue
+                            
+                            doc_number = cells_list[2].get_text(strip=True) if len(cells_list) > 2 and isinstance(cells_list[2], Tag) else ''
+                            pub_date = cells_list[3].get_text(strip=True) if len(cells_list) > 3 and isinstance(cells_list[3], Tag) else ''
+                            
+                            # 确保URL是完整的HTTP/HTTPS链接
+                            if not url.startswith('http://') and not url.startswith('https://'):
+                                if url.startswith('/'):
+                                    url = self.base_url + url
+                                elif url.startswith('javascript:') or url.startswith('#'):
+                                    logger.debug(f"跳过JavaScript链接或锚点: {url}")
+                                    continue
+                                else:
+                                    # 尝试拼接base_url
+                                    url = self.base_url + '/' + url if not url.startswith('/') else self.base_url + url
                             
                             # 解析日期
                             try:
@@ -244,7 +281,7 @@ class NationalSpider:
                             if keywords and keywords != [''] and not any(kw in title for kw in keywords):
                                 continue
                             
-                            print(f"处理政策: {title}")
+                            logger.debug(f"处理政策: {title}")
                             if callback:
                                 callback(f"正在处理: {title[:30]}...")
                             
@@ -257,11 +294,21 @@ class NationalSpider:
                                 'title': title,
                                 'pub_date': pub_date,
                                 'doc_number': doc_number,
-                                'source': url,
+                                'source': url,  # 确保source字段存在
+                                'url': url,  # 兼容字段
+                                'link': url,  # 兼容字段
                                 'content': content,
+                                'category': '',  # 添加category字段（住建部没有分类）
                                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
                             page_policies.append(policy_data)
+                            
+                            # 调用 policy_callback 实时返回政策数据
+                            if policy_callback:
+                                try:
+                                    policy_callback(policy_data)
+                                except Exception as cb_error:
+                                    logger.warning(f"调用 policy_callback 失败: {cb_error}")
                             
                             # 立即发送单条政策数据到界面
                             if callback:
@@ -269,7 +316,7 @@ class NationalSpider:
                                 # 发送政策数据信号 - 发送完整内容
                                 callback(f"POLICY_DATA:{title}|{pub_date}|{url}|{content}")
                 
-                print(f"第 {page_no} 页：找到 {len(rows)} 条，保留 {len(page_policies)} 条")
+                logger.debug(f"第 {page_no} 页：找到 {len(rows)} 条，保留 {len(page_policies)} 条")
                 total_processed += len(page_policies)
                 policies.extend(page_policies)
                 
@@ -282,18 +329,18 @@ class NationalSpider:
                         if has_target_data:
                             in_target_range = True
                             consecutive_out_of_range = 0
-                            print(f"第 {page_no} 页：进入目标时间区间 [{start_date} - {end_date}]")
+                            logger.info(f"第 {page_no} 页：进入目标时间区间 [{start_date} - {end_date}]")
                     
                     elif in_target_range:
                         # 检查是否所有数据都在目标范围外
                         all_out_of_range = all(d < dt_start or d > dt_end for d in page_dates)
                         if all_out_of_range:
                             consecutive_out_of_range += 1
-                            print(f"第 {page_no} 页：脱离目标时间区间，连续 {consecutive_out_of_range} 页")
+                            logger.debug(f"第 {page_no} 页：脱离目标时间区间，连续 {consecutive_out_of_range} 页")
                             
                             # 如果连续多页都脱离范围，停止检索
                             if consecutive_out_of_range >= max_consecutive_out_of_range:
-                                print(f"连续 {max_consecutive_out_of_range} 页脱离目标时间区间，停止检索")
+                                logger.info(f"连续 {max_consecutive_out_of_range} 页脱离目标时间区间，停止检索")
                                 return policies
                         else:
                             consecutive_out_of_range = 0
@@ -308,31 +355,48 @@ class NationalSpider:
                 
                 page_no += 1
                 
+            except requests.exceptions.Timeout as e:
+                logger.warning(f"检索第 {page_no} 页超时: {e}")
+                if callback:
+                    callback(f"检索第 {page_no} 页超时，尝试继续下一页...")
+                page_no += 1
+                continue
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"检索第 {page_no} 页连接错误: {e}")
+                if callback:
+                    callback(f"检索第 {page_no} 页连接错误，尝试继续下一页...")
+                page_no += 1
+                continue
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if hasattr(e, 'response') and e.response else None
+                logger.error(f"检索第 {page_no} 页HTTP错误: {e} (状态码: {status_code})")
+                if callback:
+                    callback(f"检索第 {page_no} 页HTTP错误 (状态码: {status_code})")
+                # HTTP错误通常是可恢复的，继续下一页
+                page_no += 1
+                continue
+            except (ValueError, KeyError) as e:
+                # JSON解析错误或数据结构错误
+                logger.warning(f"检索第 {page_no} 页数据解析错误: {e}")
+                if callback:
+                    callback(f"检索第 {page_no} 页数据解析错误，尝试继续下一页...")
+                page_no += 1
+                continue
             except Exception as e:
-                import traceback
-                print(f"检索第 {page_no} 页时出错: {e}")
-                print(f"错误详情: {traceback.format_exc()}")
+                logger.error(f"检索第 {page_no} 页时出现未知错误: {e}", exc_info=True)
                 if callback:
                     callback(f"检索第 {page_no} 页时出错: {e}")
-                
-                # 根据错误类型决定是否继续
+                # 对于未知错误，根据错误信息判断是否继续
                 error_str = str(e).lower()
                 if any(keyword in error_str for keyword in ['timeout', 'connection', 'network', 'dns']):
-                    # 网络相关错误，可以重试
-                    print(f"网络错误，尝试继续下一页...")
-                    page_no += 1
-                    continue
-                elif any(keyword in error_str for keyword in ['json', 'parse', 'decode']):
-                    # 解析错误，可能是服务器返回了错误页面
-                    print(f"解析错误，尝试继续下一页...")
+                    logger.info("检测到网络相关错误，尝试继续下一页...")
                     page_no += 1
                     continue
                 else:
-                    # 其他错误，停止爬取
-                    print(f"遇到严重错误，停止爬取")
+                    logger.error("遇到严重错误，停止爬取")
                     break
         
-        print(f"爬取完成，共获取 {len(policies)} 条政策")
+        logger.info(f"爬取完成，共获取 {len(policies)} 条政策")
         if callback:
             callback(f"爬取完成，共获取 {len(policies)} 条政策")
         
@@ -365,12 +429,15 @@ class NationalSpider:
                 'title': title,
                 'pub_date': pub_date,
                 'doc_number': doc_number,
-                'source': url,
+                'source': url,  # 确保source字段存在
+                'url': url,  # 兼容字段
+                'link': url,  # 兼容字段
                 'content': content,
+                'category': '',  # 添加category字段（住建部没有分类）
                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
         except Exception as e:
-            print(f"解析政策项失败: {e}")
+            logger.error(f"解析政策项失败: {e}", exc_info=True)
             return None
 
     def get_policy_detail(self, url, stop_callback=None):
@@ -380,11 +447,45 @@ class NationalSpider:
             if stop_callback and stop_callback():
                 return ""
             
+            # 验证 URL 有效性
+            if not url or not isinstance(url, str):
+                logger.warning(f"无效的URL: {url}")
+                return ""
+            
+            url = url.strip()
+            if not url or url == '表格没有内容' or len(url) < 10:  # 过滤明显无效的URL
+                logger.warning(f"跳过无效URL: {url}")
+                return ""
+            
+            # 确保URL是完整的HTTP/HTTPS链接
+            if not url.startswith('http://') and not url.startswith('https://'):
+                if url.startswith('/'):
+                    url = self.base_url + url
+                elif not url.startswith('http'):
+                    logger.warning(f"URL格式不正确，跳过: {url}")
+                    return ""
+            
             # 使用防反爬虫管理器发送请求
             headers = self.special_headers.copy()
             headers.update(self.anti_crawler.get_random_headers())
             
-            resp = self.anti_crawler.make_request(url, headers=headers)
+            try:
+                resp = self.anti_crawler.make_request(url, headers=headers)
+            except requests.exceptions.RequestException as e:
+                # 网络请求异常，记录但不中断流程
+                self.monitor.record_request(url, success=False, error_type=f"网络请求异常: {str(e)}")
+                logger.debug(f"获取政策详情网络请求失败: {url}, 错误: {e}")
+                return ""
+            except Exception as e:
+                # 其他异常，记录但不中断流程
+                self.monitor.record_request(url, success=False, error_type=str(e))
+                logger.debug(f"获取政策详情请求失败: {url}, 错误: {e}")
+                return ""
+            
+            # 检查响应是否有效
+            if not resp or not hasattr(resp, 'content'):
+                logger.warning(f"无效的响应: {url}")
+                return ""
             
             # 记录成功的详情页面请求
             self.monitor.record_request(url, success=True)
@@ -395,16 +496,27 @@ class NationalSpider:
             # 提取正文内容
             content_div = soup.find('div', class_='content')
             if content_div:
-                return content_div.get_text(strip=True)
-            else:
-                return soup.get_text(strip=True)
+                content = content_div.get_text(strip=True)
+                if content and len(content) > 50:  # 确保内容足够长
+                    return content
+            
+            # 备用方案：尝试其他常见的内容容器
+            for selector in ['div.article-content', 'div.text', 'div.main-content', 'div.detail']:
+                content_div = soup.select_one(selector)
+                if content_div:
+                    content = content_div.get_text(strip=True)
+                    if content and len(content) > 50:
+                        return content
+            
+            # 最后的兜底方案：返回整个页面的文本
+            return soup.get_text(strip=True)
+            
         except Exception as e:
-            # 记录失败的详情页面请求
-            self.monitor.record_request(url, success=False, error_type=str(e))
-            import traceback
-            print(f"获取政策详情失败: {e}")
-            print(f"错误详情: {traceback.format_exc()}")
-            return ""
+            # 记录失败的详情页面请求，但不抛出异常
+            url_str = str(url) if url else "未知URL"
+            self.monitor.record_request(url_str, success=False, error_type=str(e))
+            logger.debug(f"获取政策详情失败: {url_str}, 错误: {e}")
+            return ""  # 返回空字符串而不是抛出异常
 
     def save_to_db(self, policies):
         """保存政策到数据库"""
@@ -439,4 +551,4 @@ if __name__ == "__main__":
     spider = NationalSpider()
     policies = spider.crawl_policies(['规划', '空间', '用地'])
     spider.save_to_db(policies)
-    print(f"爬取到 {len(policies)} 条国家住建部政策") 
+    logger.info(f"爬取到 {len(policies)} 条国家住建部政策") 

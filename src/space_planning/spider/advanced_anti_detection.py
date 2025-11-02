@@ -16,6 +16,9 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from urllib.parse import urlparse, parse_qs
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 class AdvancedAntiDetection:
     """高级防封禁管理器"""
@@ -295,7 +298,7 @@ class AdvancedAntiDetection:
         }}
         
         self.request_count = 0
-        print(f"会话已轮换: {session_id}")
+        logger.info(f"会话已轮换: {session_id}")
     
     def get_session_info(self) -> Dict:
         """获取会话信息"""
@@ -333,11 +336,11 @@ class AdvancedAntiDetection:
     
     def enable_all_features(self) -> None:
         """启用所有功能"""
-        print("启用所有防检测功能")
+        logger.info("启用所有防检测功能")
     
     def disable_all_features(self) -> None:
         """禁用所有功能"""
-        print("禁用所有防检测功能")
+        logger.info("禁用所有防检测功能")
 
 class CookieManager:
     """Cookie管理器"""

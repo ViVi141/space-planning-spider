@@ -8,7 +8,10 @@ import os
 import sys
 import sqlite3
 import shutil
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 def find_old_database():
     """查找旧版本的数据库文件"""
@@ -43,7 +46,7 @@ def migrate_database(old_db_path, new_db_path):
         # 备份旧数据库
         backup_path = old_db_path + f".backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         shutil.copy2(old_db_path, backup_path)
-        print(f"旧数据库已备份到: {backup_path}")
+        logger.info(f"旧数据库已备份到: {backup_path}")
         
         # 连接旧数据库
         old_conn = sqlite3.connect(old_db_path)
@@ -57,13 +60,13 @@ def migrate_database(old_db_path, new_db_path):
         old_cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         old_tables = [row[0] for row in old_cursor.fetchall()]
         
-        print(f"发现旧数据库表: {old_tables}")
+        logger.info(f"发现旧数据库表: {old_tables}")
         
         # 迁移政策数据
         if 'policy' in old_tables:
             old_cursor.execute("SELECT COUNT(*) FROM policy")
             policy_count = old_cursor.fetchone()[0]
-            print(f"发现 {policy_count} 条政策数据")
+            logger.info(f"发现 {policy_count} 条政策数据")
             
             if policy_count > 0:
                 # 获取所有政策数据
@@ -81,13 +84,13 @@ def migrate_database(old_db_path, new_db_path):
                         if new_cursor.rowcount > 0:
                             migrated_count += 1
                     except Exception as e:
-                        print(f"迁移政策失败: {policy[1]} - {e}")
+                        logger.error(f"迁移政策失败: {policy[1]} - {e}", exc_info=True)
                 
-                print(f"成功迁移 {migrated_count} 条政策数据")
+                logger.info(f"成功迁移 {migrated_count} 条政策数据")
         
         # 迁移全文检索数据
         if 'policy_fts' in old_tables:
-            print("迁移全文检索数据...")
+            logger.info("迁移全文检索数据...")
             try:
                 # 重新构建全文检索索引
                 new_cursor.execute("DELETE FROM policy_fts")
@@ -95,9 +98,9 @@ def migrate_database(old_db_path, new_db_path):
                     INSERT INTO policy_fts(rowid, title, content, level)
                     SELECT id, title, content, level FROM policy
                 """)
-                print("全文检索数据迁移完成")
+                logger.info("全文检索数据迁移完成")
             except Exception as e:
-                print(f"全文检索数据迁移失败: {e}")
+                logger.error(f"全文检索数据迁移失败: {e}", exc_info=True)
         
         # 提交更改
         new_conn.commit()
@@ -106,11 +109,11 @@ def migrate_database(old_db_path, new_db_path):
         old_conn.close()
         new_conn.close()
         
-        print(f"数据库迁移完成: {old_db_path} -> {new_db_path}")
+        logger.info(f"数据库迁移完成: {old_db_path} -> {new_db_path}")
         return True
         
     except Exception as e:
-        print(f"数据库迁移失败: {e}")
+        logger.error(f"数据库迁移失败: {e}", exc_info=True)
         return False
 
 def check_database_integrity(db_path):
@@ -124,25 +127,25 @@ def check_database_integrity(db_path):
         tables = [row[0] for row in cursor.fetchall()]
         
         if 'policy' not in tables:
-            print("错误: 缺少policy表")
+            logger.error("错误: 缺少policy表")
             return False
         
         # 检查政策数量
         cursor.execute("SELECT COUNT(*) FROM policy")
         policy_count = cursor.fetchone()[0]
-        print(f"政策数量: {policy_count}")
+        logger.info(f"政策数量: {policy_count}")
         
         # 检查全文检索
         if 'policy_fts' in tables:
             cursor.execute("SELECT COUNT(*) FROM policy_fts")
             fts_count = cursor.fetchone()[0]
-            print(f"全文检索条目: {fts_count}")
+            logger.debug(f"全文检索条目: {fts_count}")
         
         conn.close()
         return True
         
     except Exception as e:
-        print(f"数据库完整性检查失败: {e}")
+        logger.error(f"数据库完整性检查失败: {e}", exc_info=True)
         return False
 
 def main():
