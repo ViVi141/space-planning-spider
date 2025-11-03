@@ -299,17 +299,17 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     'referer': 'https://gd.pkulaw.com/china/adv'
                 })
         
-        # 更新Referer（如果需要）
-        if api_config.get('referer'):
-            original_referer = self.headers.get('Referer')
-            self.headers['Referer'] = api_config['referer']
-        
+        # 注意：不修改self.headers，避免影响详情页请求
+        # 所有搜索请求都使用临时headers，保持self.headers不变
         while retry_count < max_retries:
             try:
                 # 1. 先请求翻页校验接口（仅在page_index > 1时，减少不必要的请求）
                 if page_index > 1:
                     check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
                     check_headers = self.headers.copy()
+                    # 使用正确的Referer
+                    if api_config.get('referer'):
+                        check_headers['Referer'] = api_config['referer']
                     check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                     
                     logger.debug(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
@@ -344,7 +344,10 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 
                 # 2. 再请求数据接口（使用动态API配置）
                 search_url = api_config['search_url']
+                # 使用临时headers（包含正确的Referer，但不修改self.headers）
                 search_headers = self.headers.copy()
+                if api_config.get('referer'):
+                    search_headers['Referer'] = api_config['referer']
                 search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                 
                 # 更新搜索参数中的OldPageIndex
@@ -577,7 +580,11 @@ class GuangdongSpider(EnhancedBaseCrawler):
             
             title = title_link.get_text(strip=True)
             url = title_link.get('href', '')
-            
+
+            # 过滤掉无效的JavaScript链接
+            if self._is_invalid_link(url):
+                return None
+
             # 验证标题和URL
             if not title or len(title) < 3:
                 return None
@@ -1302,9 +1309,13 @@ class GuangdongSpider(EnhancedBaseCrawler):
             for a_link in title_links:
                 link_text = a_link.get_text(strip=True)
                 link_href = a_link.get('href', '')
-                
+
+                # 过滤掉无效的JavaScript链接
+                if self._is_invalid_link(link_href):
+                    continue
+
                 # 检查是否是政策标题链接（包含特定关键词且是有效的政策链接）
-                if (link_text and link_href and 
+                if (link_text and link_href and
                     link_href.startswith('/gdchinalaw/') and
                     (any(keyword in link_text for keyword in ['条例', '规定', '办法', '通知', '意见', '决定', '公告', '细则', '规则', '标准']) or
                      len(link_text) > 10)):  # 标题通常较长
@@ -1506,19 +1517,25 @@ class GuangdongSpider(EnhancedBaseCrawler):
         """解析list-title容器 - 直接处理list-title div"""
         try:
             logger.debug("解析list-title容器")
-            
+
             # 查找标题链接
             title_link = item.find('a')
             if not title_link:
                 logger.debug("未找到标题链接")
                 return None
-            
+
             title = title_link.get_text(strip=True)
             if not title:
                 logger.debug("标题为空")
                 return None
-            
+
             link = title_link.get('href', '')
+
+            # 过滤掉无效的JavaScript链接
+            if self._is_invalid_link(link):
+                logger.debug(f"过滤掉无效链接: {link}")
+                return None
+
             if link and not link.startswith('http'):
                 link = urljoin(self.base_url, link)
             
@@ -1631,12 +1648,18 @@ class GuangdongSpider(EnhancedBaseCrawler):
             title_link = title_div.find('h4').find('a') if title_div.find('h4') else None
             if not title_link:
                 return None
-            
+
             title = title_link.get_text(strip=True)
             if not title:
                 return None
-            
+
             link = title_link.get('href', '')
+
+            # 过滤掉无效的JavaScript链接
+            if self._is_invalid_link(link):
+                logger.debug(f"过滤掉无效链接: {link}")
+                return None
+
             if link and not link.startswith('http'):
                 link = urljoin(self.base_url, link)
             
@@ -1769,8 +1792,17 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     if hasattr(a_link, 'get_text'):
                         link_text = a_link.get_text(strip=True)  # type: ignore
                         link_href = a_link.get('href', '')  # type: ignore
-                        # 检查是否是政策标题链接（通常包含特定关键词）
-                        if link_text and link_href and any(keyword in link_text for keyword in ['条例', '规定', '办法', '通知', '意见', '决定', '公告']):
+
+                        # 过滤掉无效的JavaScript链接
+                        if self._is_invalid_link(link_href):
+                            continue
+
+                        # 检查是否是政策标题链接（通常包含特定关键词，且链接有效）
+                        policy_keywords = ['条例', '规定', '办法', '通知', '意见', '决定', '公告', '实施', '办法', '细则']
+                        valid_paths = ['/gddigui/', '/gdchinalaw/', '/gdfgwj/', '/gddifang/', '/regularation/', '/gdnormativedoc/']
+                        if (link_text and link_href and
+                            any(keyword in link_text for keyword in policy_keywords) and
+                            any(path in link_href for path in valid_paths)):
                             title = link_text
                             link = link_href
                             break
@@ -1782,7 +1814,15 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     if hasattr(a_link, 'get_text'):
                         link_text = a_link.get_text(strip=True)  # type: ignore
                         link_href = a_link.get('href', '')  # type: ignore
-                        if link_text and link_href and len(link_text) > 5:  # 标题长度大于5
+
+                        # 过滤掉无效的JavaScript链接
+                        if self._is_invalid_link(link_href):
+                            continue
+
+                        # 更严格的链接验证：必须是政策库链接且标题有意义
+                        valid_paths = ['/gddigui/', '/gdchinalaw/', '/gdfgwj/', '/gddifang/', '/regularation/', '/gdnormativedoc/']
+                        if (link_text and link_href and len(link_text) > 5 and
+                            any(path in link_href for path in valid_paths)):
                             title = link_text
                             link = link_href
                             break
@@ -1843,11 +1883,27 @@ class GuangdongSpider(EnhancedBaseCrawler):
             return None
     
     def get_policy_detail(self, url):
-        """获取政策详情内容"""
+        """获取政策详情内容（优化版：根据URL路径动态设置Referer）"""
         try:
-            # 使用增强基础爬虫发送请求
+            # 根据URL路径确定正确的Referer（不修改self.headers）
             headers = self.headers.copy()
             
+            # 根据详情页URL的路径确定正确的Referer
+            # URL格式：https://gd.pkulaw.com/{library}/{id}.html
+            if url:
+                if '/gddigui/' in url:
+                    headers['Referer'] = 'https://gd.pkulaw.com/dfzfgz/adv'
+                elif '/gddifang/' in url:
+                    headers['Referer'] = 'https://gd.pkulaw.com/dfxfg/adv'
+                elif '/regularation/' in url:
+                    headers['Referer'] = 'https://gd.pkulaw.com/sfjs/adv'
+                elif '/gdnormativedoc/' in url:
+                    headers['Referer'] = 'https://gd.pkulaw.com/fljs/adv'
+                elif '/gdchinalaw/' in url or '/gdfgwj/' in url:
+                    headers['Referer'] = 'https://gd.pkulaw.com/china/adv'
+                # 如果URL不匹配任何路径，保持默认Referer
+            
+            # 使用增强基础爬虫发送请求
             resp, request_info = self.get_page(url, headers=headers)
             
             if not resp:
@@ -2109,6 +2165,10 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 if title_link:
                     title = title_link.get_text(strip=True)
                     link = title_link.get('href', '')
+
+                    # 过滤掉无效的JavaScript链接
+                    if link and self._is_invalid_link(link):
+                        link = ''
             
             # 方法2：从整个item中查找所有链接
             if not title:
@@ -2116,10 +2176,15 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 for a_link in title_links:
                     link_text = a_link.get_text(strip=True)
                     link_href = a_link.get('href', '')
-                    
+
+                    # 过滤掉无效的JavaScript链接
+                    if self._is_invalid_link(link_href):
+                        continue
+
                     # 检查是否是政策标题链接（更宽松的条件）
-                    if (link_text and link_href and 
-                        (link_href.startswith('/gdchinalaw/') or link_href.startswith('/')) and
+                    valid_paths = ['/gddigui/', '/gdchinalaw/', '/gdfgwj/', '/gddifang/', '/regularation/', '/gdnormativedoc/']
+                    if (link_text and link_href and
+                        any(path in link_href for path in valid_paths) and
                         len(link_text) > 3):
                         title = link_text
                         link = link_href
@@ -2184,7 +2249,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 'category': full_category_name or "广东省政策",  # 使用层级分类名称作为政策类型
                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
-            
+
+            # 验证政策格式是否符合预期
+            if not self._is_policy_format_valid(policy_data):
+                logger.debug(f"政策格式不符合预期，已过滤: {title[:50]}...")
+                return None
+
             return policy_data
             
         except (ValueError, KeyError, AttributeError, TypeError) as e:
@@ -2193,7 +2263,133 @@ class GuangdongSpider(EnhancedBaseCrawler):
         except Exception as e:
             logger.error(f"解析政策项目异常（未知错误）: {e}", exc_info=True)
             return None
-    
+
+    def _is_policy_format_valid(self, policy_data):
+        """验证政策数据格式是否符合预期
+
+        Args:
+            policy_data: 政策数据字典
+
+        Returns:
+            bool: True if 格式符合预期，False otherwise
+        """
+        if not isinstance(policy_data, dict):
+            logger.debug("政策数据不是字典格式")
+            return False
+
+        # 必填字段验证
+        required_fields = ['level', 'title', 'source', 'category', 'crawl_time']
+        for field in required_fields:
+            if field not in policy_data or policy_data[field] is None:
+                logger.debug(f"缺少必填字段: {field}")
+                return False
+
+        # 标题验证
+        title = policy_data.get('title', '').strip()
+        if not title or len(title) < 3:
+            logger.debug(f"标题无效: '{title}' (长度过短)")
+            return False
+
+        # 检查标题是否包含政策相关关键词（至少一个）
+        policy_keywords = [
+            '条例', '规定', '办法', '通知', '意见', '决定', '公告',
+            '实施', '办法', '细则', '规则', '指南', '标准', '规范',
+            '指导', '要求', '管理', '制度', '措施', '规划', '方案'
+        ]
+        if not any(keyword in title for keyword in policy_keywords):
+            logger.debug(f"标题不包含政策关键词: '{title[:50]}...'")
+            return False
+
+        # 来源链接验证
+        source = policy_data.get('source', '').strip()
+        if not source or not isinstance(source, str):
+            logger.debug("来源链接无效")
+            return False
+
+        # 检查是否是有效的政策链接（至少包含一个政策库路径且以.html结尾）
+        valid_paths = ['/gddigui/', '/gdchinalaw/', '/gdfgwj/', '/gddifang/', '/regularation/', '/gdnormativedoc/']
+        if not any(path in source for path in valid_paths):
+            logger.debug(f"来源链接不是有效的政策链接: {source}")
+            return False
+
+        # 确保URL以.html结尾
+        if not source.lower().endswith('.html'):
+            logger.debug(f"来源链接不是.html格式: {source}")
+            return False
+
+        # 内容验证（可选，但如果有内容应该有一定长度）
+        content = policy_data.get('content', '')
+        if content and len(content.strip()) < 50:
+            logger.debug(f"正文内容过短: {len(content)} 字符")
+            return False
+
+        # 文号格式验证（如果有文号）
+        doc_number = policy_data.get('doc_number', '').strip()
+        if doc_number:
+            # 文号通常包含年份和序号，如：粤府办〔2023〕1号
+            if len(doc_number) < 5 or not any(char.isdigit() for char in doc_number):
+                logger.debug(f"文号格式异常: '{doc_number}'")
+                return False
+
+        # 发布日期验证（如果有日期）
+        pub_date = policy_data.get('pub_date', '').strip()
+        if pub_date:
+            # 检查是否包含年份
+            if not any(str(year) in pub_date for year in range(2000, 2030)):
+                logger.debug(f"发布日期不包含有效年份: '{pub_date}'")
+                return False
+
+        # 分类验证
+        category = policy_data.get('category', '').strip()
+        if not category:
+            logger.debug("分类信息为空")
+            return False
+
+        # 爬取时间验证
+        crawl_time = policy_data.get('crawl_time', '')
+        if not crawl_time or len(crawl_time) < 10:
+            logger.debug(f"爬取时间格式异常: '{crawl_time}'")
+            return False
+
+        # 所有验证通过
+        return True
+
+    def _is_invalid_link(self, link):
+        """检查链接是否无效
+
+        Args:
+            link: 要检查的链接
+
+        Returns:
+            bool: True if 链接无效，False otherwise
+        """
+        if not link or not isinstance(link, str):
+            return True
+
+        link = link.strip().lower()
+
+        # 过滤掉JavaScript代码
+        if link.startswith('javascript:') or 'javascript:' in link:
+            return True
+
+        # 过滤掉void(0)等无效链接
+        if 'void(0)' in link or link == '#':
+            return True
+
+        # 过滤掉mailto:等非HTTP链接
+        if link.startswith(('mailto:', 'tel:', 'ftp:', 'file:')):
+            return True
+
+        # 过滤掉明显无效的链接
+        if link in ('', '/', '#', 'javascript:void(0)', 'javascript:void(0);'):
+            return True
+
+        # 只保留以.html结尾的URL（政策详情页通常是.html格式）
+        if not link.endswith('.html'):
+            return True
+
+        return False
+
     def _parse_policy_info(self, info_text):
         """解析政策信息文本"""
         validity = ""

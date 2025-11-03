@@ -46,7 +46,24 @@ class SearchThread(QThread):
             # 第一步：查询数据库现有数据
             self.progress_signal.emit("正在查询数据库...")
             db_results = db.search_policies(self.level, self.keywords, self.start_date, self.end_date)
-            self.result_signal.emit(db_results)
+
+            # 将sqlite3.Row对象转换为元组格式，与GUI期望的格式一致
+            # 数据库字段顺序: (id, level, title, pub_date, source, content, category, crawl_time)
+            formatted_results = []
+            for row in db_results:
+                # 转换为元组格式: (id, level, title, pub_date, source, content, category)
+                row_tuple = (
+                    row['id'],
+                    row['level'],
+                    row['title'],
+                    row['pub_date'],
+                    row['source'],
+                    row['content'],
+                    row['category']
+                )
+                formatted_results.append(row_tuple)
+
+            self.result_signal.emit(formatted_results)
             
             if not self.need_crawl:
                 logger.info("不需要爬取新数据，直接返回数据库结果")
