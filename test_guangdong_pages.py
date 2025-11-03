@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import re
+import copy
 import argparse
 import requests
 from bs4 import BeautifulSoup
@@ -29,7 +30,7 @@ if src_dir not in sys.path:
 # 导入配置
 from space_planning.spider.spider_config import SpiderConfig
 
-# 配置日志
+# 配置日志（必须先配置，因为导入代理管理器时可能需要logger）
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -39,6 +40,14 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# 导入代理管理器
+try:
+    from space_planning.spider.proxy_pool import initialize_proxy_pool, get_proxy, get_proxy_stats
+    PROXY_AVAILABLE = True
+except ImportError:
+    PROXY_AVAILABLE = False
+    logger.warning("代理功能不可用（proxy_pool模块未找到）")
 
 # ========== 常量定义 ==========
 # API路径映射
@@ -66,13 +75,15 @@ PAGE_SIZE_FLJS = 100  # fljs接口页大小（突破500页限制）
 
 
 class GuangdongPageCounter:
-    """广东省爬虫网页链接统计器（仅提取链接，不访问详情页，不使用代理）"""
+    """广东省爬虫网页链接统计器（仅提取链接，不访问详情页）"""
     
-    def __init__(self, max_workers: int = 1):
+    def __init__(self, max_workers: int = 1, use_proxy: bool = False, proxy_config_file: str = None):
         """初始化计数器
         
         Args:
             max_workers: 最大线程数（用于多线程处理分类）
+            use_proxy: 是否使用代理
+            proxy_config_file: 代理配置文件路径（默认使用gui/proxy_config.json）
         """
         # 获取配置
         config = SpiderConfig.get_guangdong_config()
@@ -88,22 +99,70 @@ class GuangdongPageCounter:
         self._thread_local = threading.local()  # 线程局部存储，每个线程独立的会话
         self._result_lock = threading.Lock()  # 保护共享结果的锁
         
+        # 全局失败页面队列（用于后处理重试）
+        self._global_failed_pages = []  # 记录所有失败页面
+        self._failed_pages_lock = threading.Lock()  # 保护失败页面队列
+        
+        # 代理相关
+        self.use_proxy = use_proxy and PROXY_AVAILABLE
+        self.proxy_enabled = False
+        self.proxy_stats = {}
+        
+        # 初始化代理管理器（如果启用）
+        if self.use_proxy:
+            if proxy_config_file is None:
+                # 使用默认代理配置文件路径
+                gui_dir = os.path.join(src_dir, 'space_planning', 'gui')
+                proxy_config_file = os.path.join(gui_dir, 'proxy_config.json')
+            
+            if os.path.exists(proxy_config_file):
+                try:
+                    print("正在初始化代理管理器...")
+                    initialize_proxy_pool(proxy_config_file)
+                    self.proxy_enabled = True
+                    self.proxy_stats = get_proxy_stats()
+                    print("代理管理器初始化成功")
+                except Exception as e:
+                    logger.warning(f"代理管理器初始化失败: {e}，将继续不使用代理")
+                    print(f"警告: 代理管理器初始化失败: {e}，将继续不使用代理")
+                    self.use_proxy = False
+            else:
+                logger.warning(f"代理配置文件不存在: {proxy_config_file}，将不使用代理")
+                print(f"警告: 代理配置文件不存在: {proxy_config_file}，将不使用代理")
+                self.use_proxy = False
+        
         # 创建主会话（用于单线程模式或初始化）
+        print("正在创建会话...")
         self.session = requests.Session()
         self.session.headers.update(self.headers)
+        
+        # 为主会话设置代理（如果启用）
+        if self.use_proxy:
+            print("正在获取代理...")
+            proxy_dict = self._get_proxy_dict()
+            if proxy_dict:
+                self.session.proxies.update(proxy_dict)
+                print(f"已设置代理: {proxy_dict.get('http', 'N/A')}")
+            else:
+                print("警告: 未能获取代理，将不使用代理发送请求")
         
         # 设置Cookie
         self.session.cookies.set('JSESSIONID', '1234567890ABCDEF', domain='gd.pkulaw.com')
         
-        # 访问首页获取必要的Cookie
+        # 访问首页获取必要的Cookie（增加超时时间，特别是使用代理时）
         try:
-            print("正在初始化会话...")
+            print("正在初始化会话（访问首页）...")
+            timeout = 30 if self.use_proxy else 10  # 使用代理时增加超时时间
             # 使用dfzfgz页面初始化会话（对应/dfzfgz/adv页面）
-            home_resp = self.session.get('https://gd.pkulaw.com/dfzfgz/adv', timeout=10)
+            home_resp = self.session.get('https://gd.pkulaw.com/dfzfgz/adv', timeout=timeout)
             if home_resp.status_code == 200:
                 print("会话初始化成功")
             else:
                 print(f"警告: 首页访问返回状态码 {home_resp.status_code}")
+        except requests.exceptions.Timeout as e:
+            print(f"警告: 访问首页超时（可能代理响应较慢）: {e}，继续测试...")
+        except requests.exceptions.ProxyError as e:
+            print(f"警告: 代理连接错误: {e}，继续测试...")
         except Exception as e:
             print(f"警告: 访问首页失败: {e}，继续测试...")
         
@@ -112,13 +171,112 @@ class GuangdongPageCounter:
         print("=" * 80)
         print(f"测试时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"基础URL: {self.base_url}")
-        print("代理状态: 已禁用（不使用代理）")
+        
+        # 显示代理状态
+        if self.use_proxy and self.proxy_enabled:
+            proxy_info = "已启用"
+            if self.proxy_stats:
+                total = self.proxy_stats.get('total_proxies', 0)
+                running = self.proxy_stats.get('running', False)
+                proxy_info += f" ({total} 个代理，状态: {'运行中' if running else '已停止'})"
+            print(f"代理状态: {proxy_info}")
+        else:
+            print("代理状态: 已禁用" + ("（代理功能不可用）" if not PROXY_AVAILABLE else ""))
+        
         print("工作模式: 仅提取链接，不访问详情页")
         print(f"线程模式: {'多线程' if self.max_workers > 1 else '单线程'} (最大 {self.max_workers} 个线程)")
         print("去重策略: 按URL去重")
         print("接口说明: 根据分类类型自动选择正确的接口（dfxfg/sfjs/dfzfgz/fljs）")
         print("=" * 80)
         print()
+    
+    def _process_global_failed_pages(self, all_links: set) -> int:
+        """处理全局失败页面队列，进行最大20次重试
+        
+        Args:
+            all_links: 全局链接集合（用于收集重试成功的链接）
+            
+        Returns:
+            重试成功新增的链接数
+        """
+        with self._failed_pages_lock:
+            if not self._global_failed_pages:
+                return 0
+            
+            # 深拷贝失败页面队列（包含字典嵌套）
+            failed_pages = copy.deepcopy(self._global_failed_pages)
+            self._global_failed_pages.clear()  # 清空队列
+        
+        if not failed_pages:
+            return 0
+        
+        print(f"\n开始处理 {len(failed_pages)} 个失败页面（全局重试模式，最多20次）...")
+        
+        # 创建重试专用会话
+        retry_session = requests.Session()
+        retry_session.headers.update(self.headers)
+        retry_session.cookies.set('JSESSIONID', '1234567890ABCDEF', domain='gd.pkulaw.com')
+        
+        # 为重试会话设置代理（如果启用）
+        if self.use_proxy:
+            proxy_dict = self._get_proxy_dict()
+            if proxy_dict:
+                retry_session.proxies.update(proxy_dict)
+        
+        total_new_links = 0
+        
+        for page_info in failed_pages:
+            category_name = page_info.get('category_name')
+            category_code = page_info.get('category_code')
+            page_index = page_info.get('page_index')
+            api_config = page_info.get('api_config')
+            search_params = page_info.get('search_params')
+            headers = page_info.get('headers')
+            reason = page_info.get('reason', '未知原因')
+            
+            print(f"  [全局重试] {category_name} 第 {page_index} 页（原因: {reason}）")
+            
+            # 最多重试20次
+            for attempt in range(20):
+                try:
+                    resp = retry_session.post(
+                        api_config['search_url'],
+                        data=search_params,
+                        headers=headers,
+                        timeout=30
+                    )
+                    
+                    if resp.status_code == 200:
+                        page_links = self.extract_policy_links_from_html(resp.text, api_config=api_config)
+                        if page_links and len(page_links) > 0:
+                            # 检查是否有新链接
+                            before_count = len(all_links)
+                            for link in page_links:
+                                normalized = self._normalize_url(link)
+                                all_links.add(normalized)
+                            after_count = len(all_links)
+                            
+                            if after_count > before_count:
+                                # 重试成功
+                                new_links = after_count - before_count
+                                total_new_links += new_links
+                                print(f"    [成功] 第{attempt + 1}次重试成功，新增 {new_links} 个链接")
+                                break
+                    
+                    # 重试失败，继续下一次
+                    if attempt < 19:
+                        time.sleep(1.0)  # 全局重试延迟更长
+                    
+                except Exception as e:
+                    # 重试失败，继续下一次
+                    if attempt < 19:
+                        time.sleep(1.0)  # 全局重试延迟更长
+            
+            if attempt == 19:
+                print(f"    X 放弃重试（已重试20次）")
+        
+        print(f"全局重试完成，共新增 {total_new_links} 个链接")
+        return total_new_links
     
     def _get_category_api_config(self, category_code: str) -> Dict[str, str]:
         """根据分类代码获取对应的API配置
@@ -151,6 +309,27 @@ class GuangdongPageCounter:
         
         return api_config
     
+    def _get_proxy_dict(self) -> Optional[Dict[str, str]]:
+        """获取代理字典
+        
+        Returns:
+            代理字典，格式为 {'http': 'http://ip:port', 'https': 'http://ip:port'}
+            如果未启用代理或获取失败，返回None
+        """
+        if not self.use_proxy or not self.proxy_enabled:
+            return None
+        
+        try:
+            proxy_dict = get_proxy()
+            if proxy_dict:
+                logger.debug(f"获取到代理: {proxy_dict}")
+            else:
+                logger.warning("未能获取到代理（代理池可能为空或所有代理都不可用）")
+            return proxy_dict
+        except Exception as e:
+            logger.warning(f"获取代理失败: {e}")
+            return None
+    
     def _get_thread_session(self, init_page: str = None):
         """获取当前线程的会话（线程安全）"""
         if not hasattr(self._thread_local, 'session'):
@@ -159,18 +338,95 @@ class GuangdongPageCounter:
             session.headers.update(self.headers)
             session.cookies.set('JSESSIONID', '1234567890ABCDEF', domain='gd.pkulaw.com')
             
+            # 为线程会话设置代理（如果启用）
+            if self.use_proxy:
+                proxy_dict = self._get_proxy_dict()
+                if proxy_dict:
+                    session.proxies.update(proxy_dict)
+            
             # 初始化会话（访问首页，使用传入的init_page）
             try:
                 init_url = init_page or 'https://gd.pkulaw.com/dfzfgz/adv'
-                home_resp = session.get(init_url, timeout=10)
+                timeout = 30 if self.use_proxy else 10  # 使用代理时增加超时时间
+                home_resp = session.get(init_url, timeout=timeout)
                 if home_resp.status_code == 200:
                     pass  # 初始化成功
+            except requests.exceptions.Timeout as e:
+                logger.warning(f"[线程 {threading.current_thread().name}]: 会话初始化超时: {e}")
+            except requests.exceptions.ProxyError as e:
+                logger.warning(f"[线程 {threading.current_thread().name}]: 代理连接错误: {e}")
             except Exception as e:
-                print(f"  警告 [线程 {threading.current_thread().name}]: 会话初始化失败: {e}")
+                logger.warning(f"[线程 {threading.current_thread().name}]: 会话初始化失败: {e}")
             
             self._thread_local.session = session
+            self._thread_local.session_rotation_count = 0  # 记录会话轮换次数
         
         return self._thread_local.session
+    
+    def _rotate_thread_session(self, api_config: Dict = None):
+        """轮换当前线程的会话（检测到访问限制时使用）"""
+        thread_name = threading.current_thread().name
+        init_page = api_config['init_page'] if api_config else 'https://gd.pkulaw.com/dfzfgz/adv'
+        
+        # 创建新会话
+        new_session = requests.Session()
+        new_session.headers.update(self.headers)
+        # 生成新的JSESSIONID（简单随机）
+        import random
+        import string
+        new_session_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        new_session.cookies.set('JSESSIONID', new_session_id, domain='gd.pkulaw.com')
+        
+        # 为新会话设置代理（如果启用）
+        if self.use_proxy:
+            proxy_dict = self._get_proxy_dict()
+            if proxy_dict:
+                new_session.proxies.update(proxy_dict)
+        
+        # 重新初始化会话
+        try:
+            timeout = 30 if self.use_proxy else 10  # 使用代理时增加超时时间
+            home_resp = new_session.get(init_page, timeout=timeout)
+            if home_resp.status_code == 200:
+                self._thread_local.session = new_session
+                rotation_count = getattr(self._thread_local, 'session_rotation_count', 0) + 1
+                self._thread_local.session_rotation_count = rotation_count
+                logger.info(f"[线程 {thread_name}] 会话轮换成功（第 {rotation_count} 次）")
+                return True
+            else:
+                logger.warning(f"[线程 {thread_name}] 会话轮换失败：初始化返回状态码 {home_resp.status_code}")
+                return False
+        except requests.exceptions.Timeout as e:
+            logger.warning(f"[线程 {thread_name}] 会话轮换超时: {e}")
+            return False
+        except requests.exceptions.ProxyError as e:
+            logger.warning(f"[线程 {thread_name}] 会话轮换代理错误: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"[线程 {thread_name}] 会话轮换失败：{e}")
+            return False
+    
+    def _check_access_limit(self, response_text: str) -> bool:
+        """检查响应是否包含访问限制提示
+        
+        Returns:
+            True if 检测到访问限制，False otherwise
+        """
+        limit_keywords = [
+            '访问过于频繁',
+            '访问限制',
+            '请稍后再试',
+            'Too many requests',
+            'Access denied',
+            'Rate limit',
+            '403',
+            '429'
+        ]
+        response_text_lower = response_text.lower()
+        for keyword in limit_keywords:
+            if keyword.lower() in response_text_lower:
+                return True
+        return False
     
     def _get_all_categories(self) -> List[Tuple]:
         """获取所有分类信息"""
@@ -481,13 +737,15 @@ class GuangdongPageCounter:
         
         return sorted(years, reverse=True)  # 按年份倒序排列
     
-    def extract_links_for_category(self, category_name: str, category_code: str, filter_year: int = None, use_thread_session: bool = False) -> Dict:
+    def extract_links_for_category(self, category_name: str, category_code: str, filter_year: int = None, use_thread_session: bool = False, expected_count: int = None) -> Dict:
         """提取某个分类的所有政策链接（不访问详情页）
         
         Args:
             category_name: 分类名称
             category_code: 分类代码
             filter_year: 如果指定，只提取该年份的政策（通过日期范围筛选）
+            use_thread_session: 是否使用线程局部会话
+            expected_count: 预期数量（如年份任务的预期数量，用于准确对比）
         """
         year_info = f"（筛选年份: {filter_year}年）" if filter_year else ""
         thread_name = threading.current_thread().name if use_thread_session else "主线程"
@@ -566,21 +824,25 @@ class GuangdongPageCounter:
                 # 提取总政策数（线程安全输出）
                 total_policies_from_html = self.extract_total_count_from_html(first_resp.text)
                 
-                # 优先使用配置文件中的预期数（更准确）
-                # 因为dfzfgz接口可能返回所有分类的总数，而不是当前分类的总数
-                # 但是：如果应用了年份筛选，则不能使用配置总数，必须使用实际筛选结果
+                # 优先使用传入的预期数量（如年份count，最准确）
+                # 优先级：传入的expected_count > 配置的expected_count > HTML提取的数量
                 expected_count_from_config = None
                 if category_code and category_name in self.category_config:
                     config_info = self.category_config.get(category_name, {})
                     if isinstance(config_info, dict):
                         expected_count_from_config = config_info.get('expected_count')
                 
-                # 选择使用的预期总数
-                # 如果应用了年份筛选，则不能使用配置总数，必须使用实际筛选结果
-                if expected_count_from_config and not filter_year:
+                # 选择使用的预期总数（按优先级）
+                if expected_count is not None:
+                    # 优先级1：使用传入的预期数量（如年份count）
+                    total_policies_from_html = expected_count
+                    using_source = "年份统计"
+                elif expected_count_from_config and not filter_year:
+                    # 优先级2：使用配置的预期数量（无年份筛选时）
                     total_policies_from_html = expected_count_from_config
                     using_source = "配置"
                 elif total_policies_from_html > 0:
+                    # 优先级3：使用HTML提取的数量
                     using_source = "HTML"
                 else:
                     using_source = None
@@ -588,13 +850,15 @@ class GuangdongPageCounter:
                 if total_policies_from_html > 0:
                     expected_total_pages = (total_policies_from_html + page_size - 1) // page_size
                     with self._result_lock:
-                        if using_source == "配置":
+                        if using_source == "年份统计":
+                            print(f"{thread_prefix} 预期数量: {total_policies_from_html:,} 篇（年份统计数据）")
+                        elif using_source == "配置":
                             print(f"{thread_prefix} 预期总政策数: {total_policies_from_html:,} 篇（来自配置）")
                         else:
                             print(f"{thread_prefix} 从HTML提取到总政策数: {total_policies_from_html:,} 篇")
                         print(f"{thread_prefix} 预期总页数: {expected_total_pages:,} 页（每页{page_size}条）")
                         
-                        if filter_year:
+                        if filter_year and using_source not in ["年份统计"]:
                             print(f"{thread_prefix} 提示: 已应用年份筛选（{filter_year}年），筛选后预期数量: {total_policies_from_html:,} 篇")
                         if using_source == "HTML":
                             # 如果使用HTML提取的数，检查是否与配置不同
@@ -615,9 +879,9 @@ class GuangdongPageCounter:
                 page_links = self.extract_policy_links_from_html(first_resp.text, api_config=api_config)
                 if page_links:
                     before_count = len(all_links)
-                for link in page_links:
-                    normalized = self._normalize_url(link)
-                    all_links.add(normalized)
+                    for link in page_links:
+                        normalized = self._normalize_url(link)
+                        all_links.add(normalized)
                     after_count = len(all_links)
                     previous_link_count = after_count
                     with self._result_lock:
@@ -670,8 +934,17 @@ class GuangdongPageCounter:
                 else:
                     old_page_index = page_index - 1
                 
-                # 重试机制：尝试获取当前页（最多重试3次，多线程模式下快速失败）
-                max_retries = 1 if use_thread_session else 3  # 多线程模式下仅重试1次以提升速度
+                # 重试机制：根据年份和线程模式动态调整重试次数
+                # 对早期年份（2017及以前）使用更保守的策略
+                if filter_year and filter_year <= 2017:
+                    # 早期年份：使用更多重试次数，更长的延迟
+                    max_retries = 5 if use_thread_session else 5
+                    base_retry_delay = 2.0 if use_thread_session else 2.5
+                else:
+                    # 正常年份：适度重试
+                    max_retries = 3 if use_thread_session else 3
+                    base_retry_delay = 1.0 if use_thread_session else 1.5
+                
                 retry_count = 0
                 page_success = False
                 page_links = []
@@ -719,6 +992,48 @@ class GuangdongPageCounter:
                             timeout=20 if use_thread_session else 30  # 多线程模式减少timeout
                         )
                         
+                        # 检查响应状态码和内容
+                        # 首先检查是否包含访问限制提示（即使状态码是200）
+                        if resp.status_code == 200 and self._check_access_limit(resp.text):
+                            # 检测到访问限制，尝试轮换会话（多线程模式）或等待重试
+                            session_rotated = False
+                            if use_thread_session:
+                                session_rotated = self._rotate_thread_session(api_config)
+                                if session_rotated:
+                                    session = self._get_thread_session(init_page=api_config['init_page'])
+                                    # 更新headers中的Referer
+                                    if api_config.get('referer'):
+                                        session.headers['Referer'] = api_config['referer']
+                            
+                            # 等待后重试
+                            if retry_count < max_retries - 1:
+                                retry_count += 1
+                                delay = base_retry_delay * (2 ** retry_count)  # 指数退避
+                                delay = min(delay, 10.0)  # 最大延迟10秒
+                                with self._result_lock:
+                                    if session_rotated:
+                                        print(f"{thread_prefix} 警告: 第 {page_index} 页检测到访问限制，已轮换会话，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                    else:
+                                        print(f"{thread_prefix} 警告: 第 {page_index} 页检测到访问限制，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                time.sleep(delay)
+                                continue
+                            else:
+                                # 重试用尽，记录失败
+                                page_success = False
+                                with self._result_lock:
+                                    print(f"{thread_prefix} 警告: 第 {page_index} 页检测到访问限制（重试{max_retries}次后仍失败），已加入全局重试队列")
+                                with self._failed_pages_lock:
+                                    self._global_failed_pages.append({
+                                        'category_name': category_name,
+                                        'category_code': category_code,
+                                        'page_index': page_index,
+                                        'api_config': api_config,
+                                        'search_params': search_params,
+                                        'headers': headers,
+                                        'reason': '访问限制'
+                                    })
+                                break  # 退出重试循环
+                        
                         if resp.status_code == 200:
                             # 提取当前页的所有链接
                             page_links = self.extract_policy_links_from_html(resp.text, api_config=api_config)
@@ -738,70 +1053,146 @@ class GuangdongPageCounter:
                                     # 所有链接都是重复的，需要重试
                                     if retry_count < max_retries - 1:
                                         retry_count += 1
+                                        delay = base_retry_delay * (1.5 ** retry_count)  # 较小的指数退避
+                                        delay = min(delay, 5.0)  # 最大延迟5秒
                                         if not use_thread_session:  # 减少多线程模式下的输出
                                             with self._result_lock:
-                                                print(f"  警告: 第 {page_index} 页所有链接都是重复的，重试 {retry_count}/{max_retries}...")
-                                        time.sleep(0.1 if use_thread_session else 0.5)  # 多线程模式下快速重试
+                                                print(f"  警告: 第 {page_index} 页所有链接都是重复的，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                        else:
+                                            with self._result_lock:
+                                                print(f"{thread_prefix} 警告: 第 {page_index} 页所有链接都是重复的，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                        time.sleep(delay)
                                         continue
                                     else:
-                                        # 重试用尽，标记为失败并退出重试循环
+                                        # 重试用尽，记录到全局失败队列用于后处理
                                         page_success = False
                                         with self._result_lock:
-                                            print(f"{thread_prefix} 警告: 第 {page_index} 页所有链接都是重复的（重试{max_retries}次后仍失败）")
+                                            print(f"{thread_prefix} 警告: 第 {page_index} 页所有链接都是重复的（重试{max_retries}次后仍失败），已加入全局重试队列")
+                                        with self._failed_pages_lock:
+                                            self._global_failed_pages.append({
+                                                'category_name': category_name,
+                                                'category_code': category_code,
+                                                'page_index': page_index,
+                                                'api_config': api_config,
+                                                'search_params': search_params,
+                                                'headers': headers,
+                                                'reason': '所有链接都是重复的'
+                                            })
                                         break  # 退出重试循环
                             else:
                                 # 空页：状态码200但没有链接
+                                # 对于早期年份，可能是真实空页，但仍需要重试确认
                                 if retry_count < max_retries - 1:
                                     retry_count += 1
+                                    delay = base_retry_delay * (1.5 ** retry_count)
+                                    delay = min(delay, 5.0)
                                     if not use_thread_session:  # 减少多线程模式下的输出
                                         with self._result_lock:
-                                            print(f"  警告: 第 {page_index} 页无链接，重试 {retry_count}/{max_retries}...")
-                                    time.sleep(0.1 if use_thread_session else 0.5)  # 多线程模式下快速重试
+                                            print(f"  警告: 第 {page_index} 页无链接，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                    else:
+                                        with self._result_lock:
+                                            print(f"{thread_prefix} 警告: 第 {page_index} 页无链接，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                    time.sleep(delay)
                                     continue
                                 else:
-                                    # 重试用尽，标记为失败并退出重试循环
+                                    # 重试用尽，记录到全局失败队列用于后处理
                                     page_success = False
                                     with self._result_lock:
-                                        print(f"{thread_prefix} 警告: 第 {page_index} 页无链接（重试{max_retries}次后仍失败）")
+                                        print(f"{thread_prefix} 警告: 第 {page_index} 页无链接（重试{max_retries}次后仍失败），已加入全局重试队列")
+                                    with self._failed_pages_lock:
+                                        self._global_failed_pages.append({
+                                            'category_name': category_name,
+                                            'category_code': category_code,
+                                            'page_index': page_index,
+                                            'api_config': api_config,
+                                            'search_params': search_params,
+                                            'headers': headers,
+                                            'reason': '无链接'
+                                        })
                                     break  # 退出重试循环
                         else:
                             # 请求失败：状态码不是200
+                            # 对于403/429错误，尝试轮换会话
+                            if resp.status_code in [403, 429] and use_thread_session:
+                                if self._rotate_thread_session(api_config):
+                                    session = self._get_thread_session(init_page=api_config['init_page'])
+                                    if api_config.get('referer'):
+                                        session.headers['Referer'] = api_config['referer']
+                            
                             if retry_count < max_retries - 1:
                                 retry_count += 1
+                                # 使用指数退避策略
+                                delay = base_retry_delay * (2 ** retry_count)
+                                delay = min(delay, 10.0)  # 最大延迟10秒
                                 if not use_thread_session:  # 减少多线程模式下的输出
                                     with self._result_lock:
-                                        print(f"  警告: 第 {page_index} 页请求失败（状态码: {resp.status_code}），重试 {retry_count}/{max_retries}...")
-                                time.sleep(0.1 if use_thread_session else 0.5)  # 多线程模式下快速重试
+                                        print(f"  警告: 第 {page_index} 页请求失败（状态码: {resp.status_code}），等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                else:
+                                    with self._result_lock:
+                                        print(f"{thread_prefix} 警告: 第 {page_index} 页请求失败（状态码: {resp.status_code}），等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                                time.sleep(delay)
                                 continue
                             else:
-                                # 重试用尽，标记为失败并退出重试循环
+                                # 重试用尽，记录到全局失败队列用于后处理
                                 page_success = False
                                 with self._result_lock:
-                                    print(f"{thread_prefix} 警告: 第 {page_index} 页请求失败（状态码: {resp.status_code}，重试{max_retries}次后仍失败）")
+                                    print(f"{thread_prefix} 警告: 第 {page_index} 页请求失败（状态码: {resp.status_code}，重试{max_retries}次后仍失败），已加入全局重试队列")
+                                with self._failed_pages_lock:
+                                    self._global_failed_pages.append({
+                                        'category_name': category_name,
+                                        'category_code': category_code,
+                                        'page_index': page_index,
+                                        'api_config': api_config,
+                                        'search_params': search_params,
+                                        'headers': headers,
+                                        'reason': f'请求失败({resp.status_code})'
+                                    })
                                 break  # 退出重试循环
                                 
                     except Exception as e:
+                        # 对于连接错误，尝试轮换会话（多线程模式）
+                        if isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)) and use_thread_session:
+                            if self._rotate_thread_session(api_config):
+                                session = self._get_thread_session(init_page=api_config['init_page'])
+                                if api_config.get('referer'):
+                                    session.headers['Referer'] = api_config['referer']
+                        
                         if retry_count < max_retries - 1:
                             retry_count += 1
+                            delay = base_retry_delay * (2 ** retry_count)
+                            delay = min(delay, 10.0)
                             if not use_thread_session:  # 减少多线程模式下的输出
                                 with self._result_lock:
-                                    print(f"  警告: 第 {page_index} 页请求异常: {str(e)[:50]}，重试 {retry_count}/{max_retries}...")
-                            time.sleep(0.1 if use_thread_session else 0.5)  # 多线程模式下快速重试
+                                    print(f"  警告: 第 {page_index} 页请求异常: {str(e)[:50]}，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                            else:
+                                with self._result_lock:
+                                    print(f"{thread_prefix} 警告: 第 {page_index} 页请求异常: {str(e)[:50]}，等待 {delay:.1f} 秒后重试 {retry_count}/{max_retries}...")
+                            time.sleep(delay)
                             continue
                         else:
-                            # 重试用尽，标记为失败并退出重试循环
+                            # 重试用尽，记录到全局失败队列用于后处理
                             page_success = False
                             with self._result_lock:
-                                print(f"{thread_prefix} 警告: 第 {page_index} 页请求异常（重试{max_retries}次后仍失败）: {str(e)[:50]}")
+                                print(f"{thread_prefix} 警告: 第 {page_index} 页请求异常（重试{max_retries}次后仍失败）: {str(e)[:50]}，已加入全局重试队列")
+                            with self._failed_pages_lock:
+                                self._global_failed_pages.append({
+                                    'category_name': category_name,
+                                    'category_code': category_code,
+                                    'page_index': page_index,
+                                    'api_config': api_config,
+                                    'search_params': search_params,
+                                    'headers': headers,
+                                    'reason': f'请求异常: {str(e)[:50]}'
+                                })
                             break  # 退出重试循环
                 
                 # 处理页面结果
                 if page_links and len(page_links) > 0:
                     # 标准化并添加到集合中（自动去重）
                     before_count = len(all_links)
-                for link in page_links:
-                    normalized = self._normalize_url(link)
-                    all_links.add(normalized)
+                    for link in page_links:
+                        normalized = self._normalize_url(link)
+                        all_links.add(normalized)
                     after_count = len(all_links)
                     
                     # 检查是否有新链接增加
@@ -852,8 +1243,8 @@ class GuangdongPageCounter:
                         break
                 
                 page_index += 1
-                # 添加延迟避免请求过快（多线程模式下减少延迟）
-                time.sleep(0.1 if use_thread_session else 0.3)
+                # 添加延迟避免请求过快（增加延迟以避免触发网站限速）
+                time.sleep(0.3 if use_thread_session else 0.5)
             
             total_links = len(all_links)
             with self._result_lock:
@@ -906,7 +1297,10 @@ class GuangdongPageCounter:
         return result
     
     def test_single_category(self, category_code: str = None, category_name: str = None, filter_year: int = None):
-        """测试单个分类"""
+        """测试单个分类
+        
+        如果未指定年份，自动使用年份分割模式以突破500页限制
+        """
         if category_code and category_name:
             categories = [(category_name, category_code)]
         elif category_code:
@@ -929,31 +1323,46 @@ class GuangdongPageCounter:
             print("错误: 必须指定 category_code 或 category_name")
             return None
         
-        print(f"找到 {len(categories)} 个匹配的分类，开始提取链接...")
-        print()
-        
-        results = []
-        all_unique_links = set()
-        total_links_all = 0
-        total_pages_all = 0
-        
-        for idx, (cat_name, cat_code) in enumerate(categories, 1):
-            print(f"\n[{idx}/{len(categories)}] ", end='')
-            result = self.extract_links_for_category(cat_name, cat_code, filter_year=filter_year)
-            results.append(result)
+        # 如果指定了年份，使用单线程模式；否则使用年份分割模式以突破500页限制
+        if filter_year:
+            # 指定年份时，使用单线程模式
+            print(f"找到 {len(categories)} 个匹配的分类，开始提取链接（年份: {filter_year}）...")
+            print()
             
-            if result['status'] == 'success':
-                category_links = result.get('links', [])
-                for link in category_links:
-                    normalized = self._normalize_url(link)
-                    all_unique_links.add(normalized)
-                total_links_all += result['total_links']
-                total_pages_all += result['total_pages']
-        
-        # 输出结果
-        self._print_summary(results, total_links_all, total_pages_all, all_unique_links)
-        
-        return results, list(all_unique_links)
+            results = []
+            all_unique_links = set()
+            total_links_all = 0
+            total_pages_all = 0
+            
+            for idx, (cat_name, cat_code) in enumerate(categories, 1):
+                print(f"\n[{idx}/{len(categories)}] ", end='')
+                result = self.extract_links_for_category(cat_name, cat_code, filter_year=filter_year)
+                results.append(result)
+                
+                if result['status'] == 'success':
+                    category_links = result.get('links', [])
+                    for link in category_links:
+                        normalized = self._normalize_url(link)
+                        all_unique_links.add(normalized)
+                    total_links_all += result['total_links']
+                    total_pages_all += result['total_pages']
+            
+            # 输出结果
+            self._print_summary(results, total_links_all, total_pages_all, all_unique_links)
+            
+            # 处理全局失败页面队列
+            if self._global_failed_pages:
+                retry_new_links = self._process_global_failed_pages(all_unique_links)
+                if retry_new_links > 0:
+                    total_links_all += retry_new_links
+                    print(f"\n全局重试后更新: 总链接数 {total_links_all:,} 个（新增 {retry_new_links:,} 个）")
+            
+            return results, list(all_unique_links)
+        else:
+            # 未指定年份时，自动使用年份分割模式
+            print(f"找到 {len(categories)} 个匹配的分类，使用年份分割模式（自动突破500页限制）...")
+            print()
+            return self._test_all_categories_with_year_split(categories, skip_codes=None)
     
     def _print_summary(self, results, total_links_all, total_pages_all, all_unique_links):
         """输出汇总结果"""
@@ -1028,8 +1437,10 @@ class GuangdongPageCounter:
                     years = self.extract_years_from_page(resp.text)
                     return category_code, years if years else None
                 else:
+                    logger.warning(f"获取 {category_name} ({category_code}) 年份信息失败: 状态码 {resp.status_code}")
                     return category_code, None
             except Exception as e:
+                logger.warning(f"获取 {category_name} ({category_code}) 年份信息异常: {e}")
                 return category_code, None
         
         # 并行获取年份（使用小线程池）
@@ -1059,15 +1470,15 @@ class GuangdongPageCounter:
         for category_name, category_code in categories:
             years = category_years.get(category_code)
             if years:
-                # 为每个年份创建一个任务
+                # 为每个年份创建一个任务，传递年份和count
                 for year, count in years:
                     task_id += 1
-                    tasks.append((task_id, category_name, category_code, year))
+                    tasks.append((task_id, category_name, category_code, year, count))
                     task_info[task_id] = (category_name, category_code, year)
             else:
                 # 没有年份信息，创建一个全量任务
                 task_id += 1
-                tasks.append((task_id, category_name, category_code, None))
+                tasks.append((task_id, category_name, category_code, None, None))
                 task_info[task_id] = (category_name, category_code, None)
         
         total_tasks = len(tasks)
@@ -1077,14 +1488,15 @@ class GuangdongPageCounter:
         
         # 第三步：并行执行所有任务
         def process_year_task(args):
-            task_id, category_name, category_code, year = args
+            task_id, category_name, category_code, year, year_count = args
             thread_name = threading.current_thread().name
             try:
                 result = self.extract_links_for_category(
                     category_name=category_name,
                     category_code=category_code,
                     filter_year=year,
-                    use_thread_session=True
+                    use_thread_session=True,
+                    expected_count=year_count  # 传入年份的预期数量
                 )
                 # 在结果中添加任务信息
                 result['task_id'] = task_id
@@ -1191,7 +1603,60 @@ class GuangdongPageCounter:
             final_results.append(final_result)
         
         # 打印汇总表格
-        self._print_summary_table(final_results, all_unique_links, total_links_all, total_pages_all)
+        self._print_summary(final_results, total_links_all, total_pages_all, all_unique_links)
+        
+        # 处理全局失败页面队列
+        if self._global_failed_pages:
+            retry_new_links = self._process_global_failed_pages(all_unique_links)
+            if retry_new_links > 0:
+                total_links_all += retry_new_links
+                print(f"\n全局重试后更新: 总链接数 {total_links_all:,} 个（新增 {retry_new_links:,} 个）")
+        
+        # 显示各分类的年份明细统计（年份分割模式）
+        if task_results:
+            print("\n" + "=" * 90)
+            print("各分类年份明细统计")
+            print("=" * 90)
+            
+            # 按分类分组显示年份结果
+            for category_name, category_code in categories:
+                category_results = results_by_category.get(category_code, [])
+                if not category_results:
+                    continue
+                
+                print(f"\n{category_name} ({category_code}):")
+                print(f"  {'年份':<8} {'提取数':<12} {'预期数':<12} {'覆盖率':<10} {'状态':<10}")
+                print("  " + "-" * 55)
+                
+                category_total_from_years = 0
+                category_expected_total = 0
+                
+                for result in sorted(category_results, key=lambda x: x.get('year', 0) or 0, reverse=True):
+                    year = result.get('year')
+                    if year:
+                        links = result.get('total_links', 0)
+                        expected = result.get('total_policies_from_html', 0)
+                        coverage = result.get('coverage', 0)
+                        status = result.get('status', 'unknown')
+                        
+                        year_str = f"{year}年"
+                        links_str = f"{links:,}"
+                        expected_str = f"{expected:,}"
+                        coverage_str = f"{coverage:.1f}%"
+                        
+                        print(f"  {year_str:<8} {links_str:<12} {expected_str:<12} {coverage_str:<10} {status:<10}")
+                        
+                        if status == 'success':
+                            category_total_from_years += links
+                            category_expected_total += expected
+                
+                # 显示该分类的年份合计
+                if category_total_from_years > 0:
+                    print("  " + "-" * 55)
+                    category_coverage = (category_total_from_years / category_expected_total * 100) if category_expected_total > 0 else 0
+                    print(f"  {'年份合计':<8} {category_total_from_years:,} {category_expected_total:>12,} {category_coverage:>10.1f}% {'成功':<10}")
+            
+            print("\n" + "=" * 90)
         
         return final_results, all_unique_links
     
@@ -1338,6 +1803,13 @@ class GuangdongPageCounter:
         # 输出汇总结果
         self._print_summary(results, total_links_all, total_pages_all, all_unique_links)
         
+        # 处理全局失败页面队列
+        if self._global_failed_pages:
+            retry_new_links = self._process_global_failed_pages(all_unique_links)
+            if retry_new_links > 0:
+                total_links_all += retry_new_links
+                print(f"\n全局重试后更新: 总链接数 {total_links_all:,} 个（新增 {retry_new_links:,} 个）")
+        
         return results, list(all_unique_links)
 
 
@@ -1372,19 +1844,27 @@ def main():
 智能多线程说明:
   - 默认启用智能多线程模式，根据任务自动调整线程数
   - 单个分类：自动使用2线程
-  - 所有分类：自动使用分类数（最多8线程）
+  - 所有分类：自动使用分类数（最多4线程，保守设置避免触发限速）
   - 如需单线程调试，使用 --threads 1
-  - 多线程可以显著提高处理速度
+  - 如果遇到限速，可降低线程数（如 --threads 2 或 --threads 1）
 
 年份分割模式 (突破500页限制):
-  - 使用 --year-split 启用年份分割+多线程模式
-  - 为每个分类的每个年份创建独立任务，并行提取
-  - 特别适用于数据量大的分类（如地方规范性文件XP08）
-  - 示例: python test_guangdong_pages.py --year-split --threads 10
+  - 默认自动启用年份分割模式，为每个分类的每个年份创建独立任务
+  - 自动获取所有分类的所有年份，按分类+年份并行提取
+  - 突破网站500页限制，适用于所有数据量大的分类
+  - 指定 --year 参数时，仅提取指定年份（不自动分割）
+  - XP08 (地方规范性文件): 数据量40,231篇，自动按年份分割
 
 已知分类:
-  - XP08 (地方规范性文件): 数据量大（40,231篇），可使用年份筛选或--year-split
+  - XP08 (地方规范性文件): 数据量大（40,231篇），已自动按年份分割
   - XU13 (自治条例和单行条例): 覆盖率较低
+
+代理功能说明:
+  - 使用 --use-proxy 或 -p 参数启用代理功能
+  - 代理配置文件默认位置: src/space_planning/gui/proxy_config.json
+  - 可使用 --proxy-config 指定其他配置文件路径
+  - 配置文件格式请参考 proxy_config.json.template
+  - 如果配置文件不存在或未启用，将自动禁用代理功能
         """
     )
     
@@ -1427,7 +1907,18 @@ def main():
     parser.add_argument(
         '--year-split',
         action='store_true',
-        help='使用年份分割模式：为每个分类的每个年份创建独立任务，并行提取（突破500页限制）'
+        help='显式启用年份分割模式（现已默认启用，此选项保留以兼容旧脚本）'
+    )
+    parser.add_argument(
+        '--use-proxy', '-p',
+        action='store_true',
+        help='启用代理功能（需要配置代理配置文件：src/space_planning/gui/proxy_config.json）'
+    )
+    parser.add_argument(
+        '--proxy-config',
+        type=str,
+        default=None,
+        help='代理配置文件路径（默认：src/space_planning/gui/proxy_config.json）'
     )
     
     args = parser.parse_args()
@@ -1439,19 +1930,23 @@ def main():
             # 单个分类：使用2个线程（一个主任务，一个备用）
             args.threads = 2
         else:
-            # 所有分类：根据分类数设置
+            # 所有分类：使用保守的线程数避免触发限速
             from space_planning.spider.spider_config import SpiderConfig
             config = SpiderConfig.get_guangdong_config()
             category_config = config.get('category_config', {})
             num_categories = len([k for k in category_config.keys() if isinstance(category_config[k], dict)])
-            # 自动设置线程数为分类数，但不超过8
-            args.threads = min(num_categories, 8)
+            # 自动设置线程数：不超过4个（避免触发网站限速）
+            args.threads = min(num_categories, 4)
         
         print(f"[智能多线程] 自动启用 {args.threads} 个线程")
         print()
     
     try:
-        counter = GuangdongPageCounter(max_workers=args.threads)
+        counter = GuangdongPageCounter(
+            max_workers=args.threads,
+            use_proxy=args.use_proxy,
+            proxy_config_file=args.proxy_config
+        )
         
         # 列出所有分类
         if args.list:
@@ -1537,14 +2032,12 @@ def main():
             if args.skip:
                 skip_codes = [code.strip() for code in args.skip.split(',')]
             
-            # 如果启用年份分割模式，使用年份分割+多线程
+            # 自动使用年份分割模式（突破500页限制）
             if args.year_split:
                 print("[模式] 年份分割+多线程模式（为每个分类的每个年份创建独立任务）")
                 print(f"[配置] 线程数: {args.threads}")
                 print()
-                results, unique_links = counter.test_all_categories(skip_codes=skip_codes, use_year_split=True)
-            else:
-                results, unique_links = counter.test_all_categories(skip_codes=skip_codes)
+            results, unique_links = counter.test_all_categories(skip_codes=skip_codes, use_year_split=True)
         
         print(f"\n脚本执行完成！")
         print(f"共提取到 {len(unique_links):,} 个不重复的政策链接（未访问详情页）")
@@ -1553,7 +2046,9 @@ def main():
         print("\n\n用户中断提取")
         sys.exit(0)
     except Exception as e:
-        print(f"\n提取失败: {e}", exc_info=True)
+        print(f"\n提取失败: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

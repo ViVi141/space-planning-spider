@@ -1,19 +1,19 @@
 {
-  "mode": "normal",
+  "mode": "enhanced",
   "config": {
-    "anti_detection_mode": "normal",
+    "anti_detection_mode": "enhanced",
     "use_proxy": false,
     "request_delay": {
-      "min": 1.0,
-      "max": 3.0
+      "min": 2.0,
+      "max": 5.0
     },
     "retry_settings": {
-      "max_retries": 3,
-      "retry_delay": 2
+      "max_retries": 5,
+      "retry_delay": 3
     },
     "session_settings": {
-      "rotation_interval": 300,
-      "max_requests_per_session": 50
+      "rotation_interval": 180,
+      "max_requests_per_session": 30
     },
     "headers_settings": {
       "randomize_user_agent": true,

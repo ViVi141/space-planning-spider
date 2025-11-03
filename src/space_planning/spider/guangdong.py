@@ -29,6 +29,24 @@ LEVEL_NAME = "广东省人民政府"
 # 日志记录器
 logger = logging.getLogger(__name__)
 
+# ========== API路径映射（从测试脚本迁移） ==========
+# API路径映射
+API_PATH_MAP = {
+    'dfxfg': {'menu': 'dfxfg', 'library': 'gddifang', 'class_flag': 'gddifang'},
+    'sfjs': {'menu': 'sfjs', 'library': 'regularation', 'class_flag': 'regularation'},
+    'dfzfgz': {'menu': 'dfzfgz', 'library': 'gddigui', 'class_flag': 'gddigui'},
+    'fljs': {'menu': 'fljs', 'library': 'gdnormativedoc', 'class_flag': 'gdnormativedoc'},
+    'china': {'menu': 'china', 'library': 'gdchinalaw', 'class_flag': 'gdchinalaw'}  # 兼容旧接口
+}
+
+# 分类代码到API映射
+CATEGORY_API_MAP = {
+    'XM07': 'dfxfg',
+    'XU13': 'sfjs',
+    'XO08': 'dfzfgz',
+    'XP08': 'fljs'
+}
+
 class GuangdongSpider(EnhancedBaseCrawler):
     """广东省政策爬虫 - 使用真实API接口"""
     
@@ -55,6 +73,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 添加去重缓存
         self.seen_policy_ids = set()
         self.seen_policy_hashes = set()
+        
+        # API配置缓存（用于存储当前分类的API配置）
+        self.current_api_config = None
     
     def _init_session(self):
         """初始化会话"""
@@ -214,62 +235,115 @@ class GuangdongSpider(EnhancedBaseCrawler):
             return False
     
     def _handle_access_limit(self, response_text):
-        """处理访问限制"""
-        if "您已超过全文最大访问数" in response_text or "访问限制" in response_text:
-            logger.warning("检测到访问限制，尝试轮换会话...")
-            if self._rotate_session():
-                logger.info("会话轮换成功，继续爬取")
-                return True
-            else:
-                logger.warning("会话轮换失败，等待后重试...")
-                time.sleep(self.config.get('session_rotation_delay', 30))  # 等待配置的延时
-                return self._rotate_session()
+        """处理访问限制（优化版，从测试脚本迁移）"""
+        limit_keywords = [
+            '访问过于频繁',
+            '访问限制',
+            '请稍后再试',
+            'Too many requests',
+            'Access denied',
+            'Rate limit',
+            '您已超过全文最大访问数'
+        ]
+        
+        response_text_lower = response_text.lower()
+        for keyword in limit_keywords:
+            if keyword.lower() in response_text_lower:
+                logger.warning(f"检测到访问限制关键词: {keyword}，尝试轮换会话...")
+                if self._rotate_session():
+                    logger.info("会话轮换成功，继续爬取")
+                    return True
+                else:
+                    logger.warning("会话轮换失败，等待后重试...")
+                    delay = getattr(self, 'config', {}).get('session_rotation_delay', 30) if hasattr(self, 'config') else 30
+                    time.sleep(delay)  # 等待配置的延时
+                    return self._rotate_session()
         return False
     
-    def _request_page_with_check(self, page_index, search_params, old_page_index=None):
-        """带翻页校验的页面请求"""
+    def _check_access_limit(self, response_text: str) -> bool:
+        """检查响应是否包含访问限制提示（从测试脚本迁移，兼容方法）
+        
+        Returns:
+            True if 检测到访问限制，False otherwise
+        """
+        return self._handle_access_limit(response_text)
+    
+    def _request_page_with_check(self, page_index, search_params, old_page_index=None, category_code=None):
+        """带翻页校验的页面请求（支持动态API配置）"""
         max_retries = 3
         retry_count = 0
         
+        # 根据分类代码获取API配置（从search_params中推断Menu，如果没有category_code）
+        api_config = None
+        if category_code:
+            api_config = self._get_category_api_config(category_code)
+            self.current_api_config = api_config
+        elif self.current_api_config:
+            api_config = self.current_api_config
+        else:
+            # 从search_params推断API类型
+            menu = search_params.get('Menu', 'china')
+            if menu in API_PATH_MAP:
+                api_config = API_PATH_MAP[menu].copy()
+                api_config.update({
+                    'search_url': f"{self.base_url}/{menu}/search/RecordSearch",
+                    'init_page': f"{self.base_url}/{menu}/adv",
+                    'referer': f'https://gd.pkulaw.com/{menu}/adv'
+                })
+            else:
+                # 使用默认配置（china接口，兼容旧代码）
+                api_config = API_PATH_MAP['china'].copy()
+                api_config.update({
+                    'search_url': self.search_url,
+                    'init_page': f"{self.base_url}/china/adv",
+                    'referer': 'https://gd.pkulaw.com/china/adv'
+                })
+        
+        # 更新Referer（如果需要）
+        if api_config.get('referer'):
+            original_referer = self.headers.get('Referer')
+            self.headers['Referer'] = api_config['referer']
+        
         while retry_count < max_retries:
             try:
-                # 1. 先请求翻页校验接口
-                check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
-                check_headers = self.headers.copy()
-                check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
-                
-                logger.debug(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
-                try:
-                    # ✅ 使用代理进行校验请求
-                    check_resp, check_info = self.post_page(check_url, headers=check_headers)
-                    if check_resp and check_resp.status_code == 200:
-                        self.monitor.record_request(check_url, success=True)
-                        logger.debug(f"翻页校验成功: {check_resp.status_code}")
-                    else:
-                        self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code if check_resp else 'No response'}")
-                        logger.warning(f"翻页校验失败: {check_resp.status_code if check_resp else 'No response'}")
-                        # 如果校验失败，等待后重试整个流程
+                # 1. 先请求翻页校验接口（仅在page_index > 1时，减少不必要的请求）
+                if page_index > 1:
+                    check_url = "https://gd.pkulaw.com/VerificationCode/GetRecordListTurningLimit"
+                    check_headers = self.headers.copy()
+                    check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+                    
+                    logger.debug(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                    try:
+                        # ✅ 使用代理进行校验请求
+                        check_resp, check_info = self.post_page(check_url, headers=check_headers)
+                        if check_resp and check_resp.status_code == 200:
+                            self.monitor.record_request(check_url, success=True)
+                            logger.debug(f"翻页校验成功: {check_resp.status_code}")
+                        else:
+                            self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code if check_resp else 'No response'}")
+                            logger.warning(f"翻页校验失败: {check_resp.status_code if check_resp else 'No response'}")
+                            # 如果校验失败，等待后重试整个流程
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                logger.warning(f"翻页校验失败，重试整个流程...")
+                                time.sleep(3)
+                                continue
+                            else:
+                                logger.warning(f"翻页校验达到最大重试次数，尝试跳过校验直接请求数据")
+                    except Exception as check_error:
+                        self.monitor.record_request(check_url, success=False, error_type=str(check_error))
+                        logger.error(f"翻页校验请求异常: {check_error}", exc_info=True)
+                        # 校验异常时，等待后重试
                         retry_count += 1
                         if retry_count < max_retries:
-                            logger.warning(f"翻页校验失败，重试整个流程...")
+                            logger.warning(f"翻页校验异常，重试整个流程...")
                             time.sleep(3)
                             continue
                         else:
-                            logger.warning(f"翻页校验达到最大重试次数，尝试跳过校验直接请求数据")
-                except Exception as check_error:
-                    self.monitor.record_request(check_url, success=False, error_type=str(check_error))
-                    logger.error(f"翻页校验请求异常: {check_error}", exc_info=True)
-                    # 校验异常时，等待后重试
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logger.warning(f"翻页校验异常，重试整个流程...")
-                        time.sleep(3)
-                        continue
-                    else:
-                        logger.warning(f"翻页校验异常达到最大重试次数，尝试跳过校验直接请求数据")
+                            logger.warning(f"翻页校验异常达到最大重试次数，尝试跳过校验直接请求数据")
                 
-                # 2. 再请求数据接口
-                search_url = "https://gd.pkulaw.com/china/search/RecordSearch"
+                # 2. 再请求数据接口（使用动态API配置）
+                search_url = api_config['search_url']
                 search_headers = self.headers.copy()
                 search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                 
@@ -277,7 +351,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 if old_page_index is not None:
                     search_params['OldPageIndex'] = str(old_page_index)
                 
-                logger.debug(f"请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                logger.debug(f"请求数据接口: {search_url}, 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 
                 # ✅ 使用代理进行数据请求
                 search_resp, search_info = self.post_page(search_url, data=search_params, headers=search_headers)
@@ -653,45 +727,78 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 flat_categories.append((sub_name, sub_code))
         return flat_categories
     
-    def _get_search_parameters(self, keywords=None, category_code=None, page_index=1, page_size=20, start_date=None, end_date=None, old_page_index=None):
-        """获取搜索参数 - 基于网站表单分析结果"""
+    def _get_search_parameters(self, keywords=None, category_code=None, page_index=1, page_size=20, start_date=None, end_date=None, old_page_index=None, filter_year=None, api_config=None):
+        """获取搜索参数 - 支持动态API配置（从测试脚本迁移优化版）
+        
+        Args:
+            keywords: 关键词列表
+            category_code: 分类代码
+            page_index: 页码
+            page_size: 每页数量
+            start_date: 开始日期
+            end_date: 结束日期
+            old_page_index: 上一页页码
+            filter_year: 年份筛选（如果指定，将通过ClassCodeKey传递年份实现）
+            api_config: API配置（包含menu, library, class_flag等），如果不提供则根据category_code自动获取
+        """
+        # 如果没有提供api_config，根据分类代码获取
+        if api_config is None:
+            if category_code:
+                api_config = self._get_category_api_config(category_code)
+                self.current_api_config = api_config
+            else:
+                # 使用默认配置（china接口，兼容旧代码）
+                api_config = API_PATH_MAP['china'].copy()
+                api_config.update({
+                    'search_url': self.search_url,
+                    'init_page': f"{self.base_url}/china/adv",
+                    'referer': 'https://gd.pkulaw.com/china/adv'
+                })
+        
+        # 根据接口类型调整页大小（fljs接口使用100条/页来突破500页限制）
+        if api_config.get('menu') == 'fljs' and page_size == 20:
+            page_size = 100  # fljs接口使用更大的页大小
+            logger.debug(f"fljs接口检测到，调整页大小为 {page_size}")
+        
         # 基于网站表单分析，使用正确的参数名称
         search_params = {
-            'Menu': 'china',
+            'Menu': api_config['menu'],  # 根据分类类型动态选择菜单
             'Keywords': keywords[0] if keywords and len(keywords) > 0 else '',
             'SearchKeywordType': 'Title',
             'MatchType': 'Exact',
             'RangeType': 'Piece',
-            'Library': 'gdchinalaw',
-            'ClassFlag': 'gdchinalaw',
+            'Library': api_config['library'],  # 根据分类类型动态选择库
+            'ClassFlag': api_config['class_flag'],
             'GroupLibraries': '',
             'QueryOnClick': 'False',
             'AfterSearch': 'False',
             'pdfStr': '',
             'pdfTitle': '',
             'IsAdv': 'True',
-            'ClassCodeKey': f',,,{category_code},,,' if category_code else ',,,,,,',
+            # 关键优化：年份筛选应该通过ClassCodeKey传递年份，而不是分类代码
+            # 格式：,,,2020 表示筛选2020年的数据
+            'ClassCodeKey': f',,,{filter_year}' if filter_year else (f',,,{category_code},,,' if category_code else ',,,,,,'),
             'GroupByIndex': '0',
             'OrderByIndex': '0',
             'ShowType': 'Default',
-            'GroupValue': '',
+            'GroupValue': '',  # 不使用GroupValue（改用ClassCodeKey传递年份筛选）
             'AdvSearchDic.Title': '',
             'AdvSearchDic.CheckFullText': '',
             'AdvSearchDic.IssueDepartment': '',
             'AdvSearchDic.DocumentNO': '',
-            'AdvSearchDic.IssueDate': start_date or '',
-            'AdvSearchDic.ImplementDate': end_date or '',
+            'AdvSearchDic.IssueDate': start_date or '',  # 保留日期筛选作为备用
+            'AdvSearchDic.ImplementDate': end_date or '',  # 保留日期筛选作为备用
             'AdvSearchDic.TimelinessDic': '',
             'AdvSearchDic.EffectivenessDic': '',
             'TitleKeywords': ' '.join(keywords) if keywords else '',
             'FullTextKeywords': ' '.join(keywords) if keywords else '',
-            'Pager.PageIndex': str(page_index),  # 使用1基索引
-            'Pager.PageSize': str(page_size),
+            'Pager.PageIndex': str(page_index),
+            'Pager.PageSize': str(page_size),  # 注意：fljs接口需要使用100条/页来突破500页限制
             'QueryBase64Request': '',
             'VerifyCodeResult': '',
             'isEng': 'chinese',
             'OldPageIndex': str(old_page_index) if old_page_index is not None else '',
-            'newPageIndex': '',
+            'newPageIndex': str(page_index) if old_page_index is not None else '',
             'X-Requested-With': 'XMLHttpRequest',  # 必须的AJAX标识
         }
         
@@ -2469,8 +2576,15 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     if callback:
                         callback(f"正在请求第 {page_index} 页...")
                     
-                    # 使用带翻页校验的请求方法
-                    resp = self._request_page_with_check(page_index, post_data, page_index - 1 if page_index > 1 else None)
+                    # 使用带翻页校验的请求方法（从post_data中推断category_code）
+                    category_code_from_params = None
+                    # 尝试从ClassCodeKey中提取category_code（格式：,,,code,,,）
+                    class_code_key = post_data.get('ClassCodeKey', '')
+                    if class_code_key and class_code_key.count(',') >= 4:
+                        parts = class_code_key.split(',')
+                        if len(parts) >= 4 and parts[3]:
+                            category_code_from_params = parts[3]
+                    resp = self._request_page_with_check(page_index, post_data, page_index - 1 if page_index > 1 else None, category_code=category_code_from_params)
                     
                     if not resp:
                         logger.warning(f"第 {page_index} 页请求失败")
@@ -2641,7 +2755,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
                         if callback:
                             callback(f"策略2：正在请求第 {page_index_2} 页...")
                         
-                        resp_2 = self._request_page_with_check(page_index_2, post_data_2, page_index_2 - 1 if page_index_2 > 1 else None)
+                        # 从post_data_2中提取category_code
+                        category_code_from_params_2 = None
+                        class_code_key_2 = post_data_2.get('ClassCodeKey', '')
+                        if class_code_key_2 and class_code_key_2.count(',') >= 4:
+                            parts_2 = class_code_key_2.split(',')
+                            if len(parts_2) >= 4 and parts_2[3]:
+                                category_code_from_params_2 = parts_2[3]
+                        resp_2 = self._request_page_with_check(page_index_2, post_data_2, page_index_2 - 1 if page_index_2 > 1 else None, category_code=category_code_from_params_2)
                         
                         if not resp_2:
                             logger.warning(f"策略2第{page_index_2}页请求失败")
@@ -2750,7 +2871,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                                 end_date=end_date
                             )
                             
-                            resp_3 = self._request_page_with_check(page_index_3, post_data_3, page_index_3 - 1 if page_index_3 > 1 else None)
+                            resp_3 = self._request_page_with_check(page_index_3, post_data_3, page_index_3 - 1 if page_index_3 > 1 else None, category_code=category_code)
                             
                             if not resp_3:
                                 break
