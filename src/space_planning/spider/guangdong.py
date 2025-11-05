@@ -10,7 +10,7 @@ import time
 import random
 import threading
 from datetime import datetime
-from typing import List, Dict, Optional, Callable, Any
+from typing import List, Dict, Optional, Callable, Any, Tuple
 from urllib.parse import urljoin, urlparse
 import logging
 
@@ -471,19 +471,53 @@ class GuangdongSpider(EnhancedBaseCrawler):
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             policies = []
-            
+
             # 调试：打印页面标题和基本信息
             page_title = soup.find('title')
             if page_title:
                 logger.debug(f"页面标题: {page_title.get_text()}")
-            
-            # 方法1: 查找政策列表项 - 更精确的选择器
+
+            # 方法1: 从复选框value提取政策ID并构建URL（最可靠）
+            # 这是从测试脚本迁移的最可靠方法，直接从表单复选框提取政策ID
+            checkboxes = soup.select('input.checkbox[name="recordList"]')
+            checkbox_policies = []
+            if checkboxes:
+                logger.debug(f"从复选框提取到 {len(checkboxes)} 个政策ID")
+                for checkbox in checkboxes:
+                    policy_id = checkbox.get('value', '').strip()
+                    if policy_id and len(policy_id) > 10:  # 政策ID通常是较长的字符串
+                        # 根据当前API配置确定链接路径
+                        current_config = getattr(self, 'current_api_config', None)
+                        if current_config and isinstance(current_config, dict):
+                            link_path = current_config.get('library', 'gddigui')
+                        else:
+                            link_path = 'gddigui'  # 默认值
+                        url = f"{self.base_url}/{link_path}/{policy_id}.html"
+
+                        # 创建基础政策数据
+                        policy_data = {
+                            'level': '广东省人民政府',
+                            'title': f'政策ID: {policy_id}',  # 临时标题，后续会获取完整信息
+                            'pub_date': '',  # 需要从详情页获取
+                            'source': url,
+                            'url': url,
+                            'content': '',  # 需要从详情页获取
+                            'category': category_name or '',
+                            'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'policy_id': policy_id  # 保存政策ID用于后续处理
+                        }
+
+                        # 标记需要获取详情内容（延迟到所有政策解析完成后批量获取）
+                        policy_data['_need_detail_fetch'] = True  # 标记需要获取详情
+                        checkbox_policies.append(policy_data)
+
+            # 方法2: 传统HTML解析方法（作为备用）
             policy_items = []
-            
+
             # 尝试多种选择器
             selectors = [
                 'tr[class*="item"]',
-                'tr[class*="policy"]', 
+                'tr[class*="policy"]',
                 'tr[class*="record"]',
                 'tr[class*="list"]',
                 'div[class*="item"]',
@@ -495,14 +529,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 'li[class*="record"]',
                 'li[class*="list"]'
             ]
-            
+
             for selector in selectors:
                 items = soup.select(selector)
                 if items:
                     policy_items.extend(items)
                     logger.debug(f"使用选择器 '{selector}' 找到 {len(items)} 个项目")
                     break
-            
+
             # 如果上面的选择器都没找到，尝试查找所有包含链接的表格行
             if not policy_items:
                 all_tr = soup.find_all('tr')
@@ -510,7 +544,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     if tr.find('a') and tr.find('a').get('href'):
                         policy_items.append(tr)
                 logger.debug(f"通过表格行找到 {len(policy_items)} 个包含链接的项目")
-            
+
             # 如果还是没有，尝试查找所有包含链接的div
             if not policy_items:
                 all_divs = soup.find_all('div')
@@ -520,42 +554,173 @@ class GuangdongSpider(EnhancedBaseCrawler):
                         policy_items.append(div)
                 logger.debug(f"通过div找到 {len(policy_items)} 个包含链接的项目")
             
-            logger.info(f"总共找到 {len(policy_items)} 个潜在的政策项目")
-            
+            # 合并两种方法的政策数据
+            all_policy_items = policy_items.copy()
+
+            # 如果有checkbox提取的政策，添加到列表中
+            if checkbox_policies:
+                # 为checkbox政策创建虚拟的HTML元素，以便统一处理
+                for checkbox_policy in checkbox_policies:
+                    # 创建一个简单的虚拟元素来传递数据
+                    class VirtualItem:
+                        def __init__(self, policy_data):
+                            self.policy_data = policy_data
+                            self.from_checkbox = True
+
+                        def find(self, tag):
+                            return None
+
+                        def get_text(self):
+                            return self.policy_data.get('title', '')
+
+                    virtual_item = VirtualItem(checkbox_policy)
+                    all_policy_items.append(virtual_item)
+
+                logger.info(f"合并政策数据: checkbox方法 {len(checkbox_policies)} 个, 传统方法 {len(policy_items)} 个")
+
+            logger.info(f"总共找到 {len(all_policy_items)} 个潜在的政策项目")
+
             # 调试：打印前几个项目的内容
-            for i, item in enumerate(policy_items[:3]):
-                logger.debug(f"项目 {i+1}: {item.get_text()[:100]}...")
-            
-            for item in policy_items:
+            for i, item in enumerate(all_policy_items[:3]):
+                if hasattr(item, 'from_checkbox') and item.from_checkbox:
+                    logger.debug(f"项目 {i+1} (checkbox): {item.policy_data.get('title', '')}")
+                else:
+                    logger.debug(f"项目 {i+1}: {item.get_text()[:100]}...")
+
+            for item in all_policy_items:
                 # 检查是否停止
                 if stop_callback and stop_callback():
                     logger.info("用户已停止爬取")
                     break
-                
+
                 try:
-                    policy_data = self._extract_policy_from_item(item, category_name)
+                    # 处理checkbox提取的政策
+                    if hasattr(item, 'from_checkbox') and item.from_checkbox:
+                        policy_data = item.policy_data
+                    else:
+                        # 传统HTML解析方法
+                        policy_data = self._extract_policy_from_item(item, category_name)
+
                     if policy_data:
                         policies.append(policy_data)
-                        
-                        # 立即调用 policy_callback 实现流动显示（广东省专用）
-                        # 在解析时立即回调，确保每条政策解析完成后立即显示
-                        if policy_callback:
-                            try:
-                                policy_callback(policy_data)
-                                # 小延迟确保界面流畅更新（10毫秒，几乎不影响性能）
-                                time.sleep(0.005)  # 减少到5毫秒，提高流动速度
-                            except Exception as cb_error:
-                                logger.warning(f"调用 policy_callback 失败: {cb_error}")
-                        
-                        # 发送政策数据信号
-                        if callback:
-                            callback(f"获取政策: {policy_data.get('title', '未知标题')}")
-                            
+
+                        # 注意：不在此处调用policy_callback，避免时序问题
+                        # 批量详情获取完成后统一发送
+
                 except Exception as e:
                     logger.warning(f"解析政策项目失败: {e}", exc_info=True)
                     continue
             
-            logger.info(f"成功解析 {len(policies)} 条政策")
+            # 批量获取需要详情内容的政策
+            policies_needing_detail = [p for p in policies if p.get('_need_detail_fetch')]
+            if policies_needing_detail:
+                logger.info(f"批量获取 {len(policies_needing_detail)} 条政策的详情内容...")
+                for policy in policies_needing_detail:
+                    if stop_callback and stop_callback():
+                        logger.info("用户已停止爬取")
+                        break
+
+                    url = policy.get('url')
+                    if url:
+                        try:
+                            logger.debug(f"获取政策详情: {url}")
+                            content = self.get_policy_detail(url)
+                            if content and len(content) > 50:
+                                # 从详情页提取真实标题
+                                detail_soup = BeautifulSoup(content, 'html.parser')
+
+                                # 尝试多种方式获取标题
+                                real_title = None
+
+                                # 方法1: 从<title>标签获取
+                                title_tag = detail_soup.find('title')
+                                if title_tag and title_tag.get_text(strip=True):
+                                    title_text = title_tag.get_text(strip=True)
+                                    # 清理标题（移除网站名称等）
+                                    if ' - ' in title_text:
+                                        real_title = title_text.split(' - ')[0].strip()
+                                    elif ' | ' in title_text:
+                                        real_title = title_text.split(' | ')[0].strip()
+                                    elif '_' in title_text:
+                                        real_title = title_text.split('_')[0].strip()
+                                    else:
+                                        real_title = title_text
+
+                                # 方法2: 从所有<h1>、<h2>、<h3>获取
+                                if not real_title or real_title.startswith('政策ID:'):
+                                    for tag_name in ['h1', 'h2', 'h3']:
+                                        headings = detail_soup.find_all(tag_name)
+                                        for heading in headings:
+                                            heading_text = heading.get_text(strip=True)
+                                            if (heading_text and
+                                                len(heading_text) > 5 and
+                                                len(heading_text) < 200 and
+                                                not heading_text.isdigit() and  # 排除纯数字
+                                                not heading_text.startswith('http') and  # 排除URL
+                                                '政策ID:' not in heading_text and  # 排除政策ID
+                                                not heading_text.lower().startswith(('page', '第'))):  # 排除分页信息
+                                                real_title = heading_text
+                                                break
+                                        if real_title:
+                                            break
+
+                                # 方法2.5: 从strong标签或特定class获取
+                                if not real_title or real_title.startswith('政策ID:'):
+                                    title_selectors = [
+                                        'div.title', 'div.article-title', 'div.policy-title',
+                                        'h4.title', 'strong', 'b', '.title'
+                                    ]
+                                    for selector in title_selectors:
+                                        title_elements = detail_soup.select(selector)
+                                        for element in title_elements:
+                                            element_text = element.get_text(strip=True)
+                                            if (element_text and
+                                                len(element_text) > 5 and
+                                                len(element_text) < 150 and
+                                                not element_text.isdigit() and
+                                                '政策ID:' not in element_text and
+                                                not element_text.startswith('http')):
+                                                real_title = element_text
+                                                break
+                                        if real_title:
+                                            break
+
+                                # 更新政策数据
+                                if real_title and not real_title.startswith('政策ID:'):
+                                    policy['title'] = real_title
+                                    logger.info(f"✓ 成功提取真实标题: {real_title}")
+                                else:
+                                    logger.warning(f"⚠️ 未能提取有效标题，保持原标题: {policy.get('title', 'N/A')}")
+
+                                policy['content'] = content
+                                logger.info(f"✓ 成功获取政策正文，长度: {len(content)}")
+
+                            else:
+                                logger.warning(f"✗ 详情内容为空或过短: {len(content) if content else 0}")
+
+                            # 移除标记
+                            policy.pop('_need_detail_fetch', None)
+
+                        except Exception as e:
+                            logger.warning(f"✗ 获取政策详情失败: {url}, 错误: {e}")
+                            policy.pop('_need_detail_fetch', None)
+
+            # 批量详情获取完成后，统一发送所有政策数据到GUI
+            if policy_callback:
+                logger.info(f"批量详情获取完成，发送 {len(policies)} 条完整政策数据到GUI...")
+                for policy in policies:
+                    try:
+                        policy_callback(policy)
+                        # 小延迟确保界面流畅更新
+                        time.sleep(0.005)
+                    except Exception as cb_error:
+                        logger.warning(f"发送政策数据到GUI失败: {cb_error}")
+
+            # 发送解析完成信号
+            if callback:
+                callback(f"成功解析并获取详情: {len(policies)} 条政策")
+
+            logger.info(f"成功解析 {len(policies)} 条政策并完成详情获取")
             return policies
             
         except (ValueError, KeyError, AttributeError, TypeError) as e:
@@ -673,13 +838,18 @@ class GuangdongSpider(EnhancedBaseCrawler):
             # 调试信息
             logger.debug(f"提取政策: {title[:50]}... | 日期: {pub_date} | 文号: {doc_number}")
             
-            # 尝试获取政策详情内容（可选，避免影响性能）
+            # 尝试获取政策详情内容
             content = ""
             try:
                 if url:
+                    logger.debug(f"获取政策详情: {url}")
                     content = self.get_policy_detail(url)
+                    if content and len(content) > 50:
+                        logger.debug(f"成功获取政策详情，长度: {len(content)}")
+                    else:
+                        logger.debug(f"政策详情内容为空或过短: {len(content) if content else 0}")
             except Exception as e:
-                logger.debug(f"获取政策详情失败（可选操作）: {url}, {e}")
+                logger.warning(f"获取政策详情失败: {url}, {e}")
             
             return {
                 'level': '广东省人民政府',
@@ -782,9 +952,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
             'pdfStr': '',
             'pdfTitle': '',
             'IsAdv': 'True',
-            # 关键优化：年份筛选应该通过ClassCodeKey传递年份，而不是分类代码
-            # 格式：,,,2020 表示筛选2020年的数据
-            'ClassCodeKey': f',,,{filter_year}' if filter_year else (f',,,{category_code},,,' if category_code else ',,,,,,'),
+            # 修复：同时支持分类代码和年份筛选
+            # 格式：,,,XP08,,,2023 表示筛选XP08分类的2023年数据
+            'ClassCodeKey': (
+                f',,,{category_code},,,{filter_year}' if filter_year and category_code
+                else f',,,{filter_year}' if filter_year
+                else f',,,{category_code},,,' if category_code
+                else ',,,,,,'
+            ),
             'GroupByIndex': '0',
             'OrderByIndex': '0',
             'ShowType': 'Default',
@@ -879,25 +1054,57 @@ class GuangdongSpider(EnhancedBaseCrawler):
         logger.info(f"重复率: {(len(policies) - len(unique_policies)) / len(policies) * 100:.1f}%" if policies else "0%")
         
         return unique_policies
-    
-    def _try_different_search_strategies(self, keywords=None, callback=None, stop_callback=None, policy_callback=None):
-        """使用成功的搜索策略获取数据 - 添加分页处理
-        
+
+    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None,
+                      speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, policy_callback=None):
+        """爬取广东省政策
+
         Args:
             keywords: 关键词列表
             callback: 进度回调函数
+            start_date: 起始日期
+            end_date: 结束日期
+            speed_mode: 速度模式
+            disable_speed_limit: 是否禁用速度限制
             stop_callback: 停止回调函数
             policy_callback: 政策数据回调函数，每解析到一条政策时调用
         """
-        logger.info("使用成功的搜索策略...")
-        
+        logger.info(f"开始爬取广东省政策，关键词: {keywords}")
+
+        # 解析时间范围
+        dt_start = None
+        dt_end = None
+        enable_time_filter = False
+
+        if start_date and end_date:
+            try:
+                dt_start = datetime.strptime(start_date, '%Y-%m-%d')
+                dt_end = datetime.strptime(end_date, '%Y-%m-%d')
+                enable_time_filter = True
+                logger.info(f"启用时间过滤: {start_date} 至 {end_date}")
+            except ValueError:
+                logger.warning(f"时间格式错误，禁用时间过滤")
+
+        # 设置速度模式
+        if speed_mode == "快速模式":
+            delay_range = (0.1, 0.5)
+        elif speed_mode == "慢速模式":
+            delay_range = (2, 4)
+        else:  # 正常速度
+            delay_range = (1, 2)
+
+        # 获取所有分类
+        categories = self._get_flat_categories()
+        logger.info(f"找到 {len(categories)} 个分类")
+
         all_policies = []
-        page_index = 1
-        max_pages = 50  # 增加页数限制
-        empty_page_count = 0
-        max_empty_pages = 5  # 连续空页数限制
-        
-        while page_index <= max_pages and empty_page_count < max_empty_pages:
+
+        # 遍历所有分类进行年份分割爬取
+        logger.info("开始传统分类爬取...")
+        if callback:
+            callback("开始传统分类爬取...")
+
+        for category_name, category_code in categories:
             if stop_callback and stop_callback():
                 logger.info("用户已停止爬取")
                 break
@@ -971,7 +1178,104 @@ class GuangdongSpider(EnhancedBaseCrawler):
             # 添加延迟避免请求过快
             time.sleep(1)
         
-        logger.info(f"策略完成，共获取 {len(all_policies)} 条政策")
+        # 处理需要详情获取的政策（china接口的结果）
+        if all_policies:
+            policies_needing_detail = [p for p in all_policies if p.get('_need_detail_fetch')]
+            if policies_needing_detail:
+                logger.info(f"china接口策略：批量获取 {len(policies_needing_detail)} 条政策的详情内容...")
+                for policy in policies_needing_detail:
+                    if stop_callback and stop_callback():
+                        logger.info("用户已停止爬取")
+                        break
+
+                    url = policy.get('url')
+                    if url:
+                        try:
+                            logger.debug(f"china接口：获取政策详情: {url}")
+                            content = self.get_policy_detail(url)
+                            if content and len(content) > 50:
+                                # 从详情页提取真实标题
+                                detail_soup = BeautifulSoup(content, 'html.parser')
+
+                                # 尝试多种方式获取标题
+                                real_title = None
+
+                                # 方法1: 从<title>标签获取
+                                title_tag = detail_soup.find('title')
+                                if title_tag and title_tag.get_text(strip=True):
+                                    title_text = title_tag.get_text(strip=True)
+                                    # 清理标题（移除网站名称等）
+                                    if ' - ' in title_text:
+                                        real_title = title_text.split(' - ')[0].strip()
+                                    elif ' | ' in title_text:
+                                        real_title = title_text.split(' | ')[0].strip()
+                                    elif '_' in title_text:
+                                        real_title = title_text.split('_')[0].strip()
+                                    else:
+                                        real_title = title_text
+
+                                # 方法2: 从所有<h1>、<h2>、<h3>获取
+                                if not real_title or real_title.startswith('政策ID:'):
+                                    for tag_name in ['h1', 'h2', 'h3']:
+                                        headings = detail_soup.find_all(tag_name)
+                                        for heading in headings:
+                                            heading_text = heading.get_text(strip=True)
+                                            if (heading_text and
+                                                len(heading_text) > 5 and
+                                                len(heading_text) < 200 and
+                                                not heading_text.isdigit() and  # 排除纯数字
+                                                not heading_text.startswith('http') and  # 排除URL
+                                                '政策ID:' not in heading_text and  # 排除政策ID
+                                                not heading_text.lower().startswith(('page', '第'))):  # 排除分页信息
+                                                real_title = heading_text
+                                                break
+                                        if real_title:
+                                            break
+
+                                # 方法2.5: 从strong标签或特定class获取
+                                if not real_title or real_title.startswith('政策ID:'):
+                                    title_selectors = [
+                                        'div.title', 'div.article-title', 'div.policy-title',
+                                        'h4.title', 'strong', 'b', '.title'
+                                    ]
+                                    for selector in title_selectors:
+                                        title_elements = detail_soup.select(selector)
+                                        for element in title_elements:
+                                            element_text = element.get_text(strip=True)
+                                            if (element_text and
+                                                len(element_text) > 5 and
+                                                len(element_text) < 150 and
+                                                not element_text.isdigit() and
+                                                '政策ID:' not in element_text and
+                                                not element_text.startswith('http')):
+                                                real_title = element_text
+                                                break
+                                        if real_title:
+                                            break
+
+                                # 更新政策数据
+                                if real_title and not real_title.startswith('政策ID:'):
+                                    policy['title'] = real_title
+                                    logger.info(f"✓ china接口：成功提取真实标题: {real_title}")
+                                else:
+                                    logger.warning(f"⚠️ china接口：未能提取有效标题，保持原标题: {policy.get('title', 'N/A')}")
+
+                                policy['content'] = content
+                                logger.info(f"✓ china接口：成功获取政策正文，长度: {len(content)}")
+
+                            else:
+                                logger.warning(f"✗ china接口：详情内容为空或过短: {len(content) if content else 0}")
+
+                            # 移除标记
+                            policy.pop('_need_detail_fetch', None)
+
+                        except Exception as e:
+                            logger.warning(f"✗ china接口：获取政策详情失败: {url}, 错误: {e}")
+                            policy.pop('_need_detail_fetch', None)
+
+        # 注意：china接口的政策已经在前面通过policy_callback发送过了
+        # 这里批量详情获取是为了更新已发送的数据
+        logger.info(f"china接口策略完成，共获取 {len(all_policies)} 条政策")
         return all_policies
     
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
@@ -1028,19 +1332,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         
         all_policies = []
         
-        # 首先尝试不同的搜索策略
-        logger.info("开始尝试多种搜索策略...")
-        if callback:
-            callback("开始尝试多种搜索策略...")
-        
-        strategy_policies = self._try_different_search_strategies(keywords, callback, stop_callback, policy_callback)
-        if strategy_policies:
-            all_policies.extend(strategy_policies)
-            logger.info(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
-            if callback:
-                callback(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
-        
-        # 然后遍历所有分类进行传统爬取
+        # 遍历所有分类进行年份分割爬取
         logger.info("开始传统分类爬取...")
         if callback:
             callback("开始传统分类爬取...")
@@ -1059,7 +1351,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             max_pages = 999999  # 最大页数限制（无上限）
             category_policies = []
             empty_page_count = 0  # 连续空页计数
-            max_empty_pages = 10   # 最大连续空页数（增加容忍度）
+            max_empty_pages = 20   # 最大连续空页数（大幅增加容忍度）
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -2112,33 +2404,334 @@ class GuangdongSpider(EnhancedBaseCrawler):
     def _parse_policy_list_optimized(self, soup, callback=None, stop_callback=None, category_name=None):
         """优化的政策列表解析 - 基于最新HTML结构分析"""
         policies = []
-        
+
         # 基于HTML分析，直接查找政策列表项
         policy_items = soup.find_all('li')
         logger.debug(f"找到 {len(policy_items)} 个li元素")
-        
+
         for item in policy_items:
             # 检查是否停止
             if stop_callback and stop_callback():
                 logger.info("用户已停止爬取")
                 break
-            
+
             try:
                 # 检查是否包含政策内容
                 if self._is_policy_item(item):
                     policy_data = self._parse_policy_item_optimized(item, category_name)
                     if policy_data and not self._is_duplicate_policy(policy_data):
                         policies.append(policy_data)
-                        
+
                         # 发送政策数据信号
                         if callback:
                             callback(f"POLICY_DATA:{policy_data.get('title', '')}|{policy_data.get('pub_date', '')}|{policy_data.get('source', '')}|{policy_data.get('content', '')}|{policy_data.get('category', '')}")
-                            
+
             except Exception as e:
                 logger.warning(f"解析政策项目失败: {e}", exc_info=True)
-        
+
         return policies
-    
+
+    def _extract_policy_detail_content_and_title(self, html_content, url):
+        """从详情页面提取内容和标题"""
+        try:
+            detail_soup = BeautifulSoup(html_content, 'html.parser')
+            content = ""
+            real_title = ""
+
+            # 调试：输出页面基本信息
+            logger.debug(f"详情页面URL: {url}")
+            logger.debug(f"页面标题标签数量: {len(detail_soup.find_all('title'))}")
+            logger.debug(f"H1标签数量: {len(detail_soup.find_all('h1'))}")
+            logger.debug(f"H2标签数量: {len(detail_soup.find_all('h2'))}")
+            logger.debug(f"H3标签数量: {len(detail_soup.find_all('h3'))}")
+
+            # 方法1: 从ArticleTitle隐藏输入框获取（最优先，从网页分析发现这是最可靠的）
+            article_title_input = detail_soup.find('input', {'id': 'ArticleTitle'})
+            if article_title_input and article_title_input.get('value'):
+                real_title = article_title_input.get('value').strip()
+                logger.debug(f"从ArticleTitle输入框提取标题: '{real_title}'")
+
+            # 方法2: 从页面标题获取
+            if not real_title or real_title.startswith('政策ID:'):
+                title_tag = detail_soup.find('title')
+                if title_tag:
+                    title_text = title_tag.get_text(strip=True)
+                    logger.debug(f"页面title内容: '{title_text}'")
+                    # 清理标题（移除网站名称等）
+                    if ' - ' in title_text:
+                        real_title = title_text.split(' - ')[0].strip()
+                    elif ' | ' in title_text:
+                        real_title = title_text.split(' | ')[0].strip()
+                    elif '_' in title_text:
+                        real_title = title_text.split('_')[0].strip()
+                    else:
+                        real_title = title_text
+
+            # 方法3: 从h2.title获取（从网页分析发现的重要位置）
+            if not real_title or real_title.startswith('政策ID:'):
+                h2_title = detail_soup.find('h2', class_='title')
+                if h2_title:
+                    h2_text = h2_title.get_text(strip=True)
+                    logger.debug(f"从h2.title提取标题: '{h2_text}'")
+                    if len(h2_text) > 10 and len(h2_text) < 200:
+                        real_title = h2_text
+
+            # 方法4: 从.MTitle获取（从网页分析发现的位置）
+            if not real_title or real_title.startswith('政策ID:'):
+                mtitle_elem = detail_soup.find(class_='MTitle')
+                if mtitle_elem:
+                    mtitle_text = mtitle_elem.get_text(strip=True)
+                    logger.debug(f"从.MTitle提取标题: '{mtitle_text}'")
+                    if len(mtitle_text) > 10 and len(mtitle_text) < 200:
+                        real_title = mtitle_text
+
+            # 方法5: 从所有<h1>、<h2>、<h3>获取
+            if not real_title or real_title.startswith('政策ID:'):
+                for tag_name in ['h1', 'h2', 'h3']:
+                    headings = detail_soup.find_all(tag_name)
+                    for heading in headings:
+                        heading_text = heading.get_text(strip=True)
+                        if (heading_text and
+                            len(heading_text) > 5 and
+                            len(heading_text) < 200 and
+                            not heading_text.isdigit() and  # 排除纯数字
+                            not heading_text.startswith('http') and  # 排除URL
+                            '政策ID:' not in heading_text and  # 排除政策ID
+                            not heading_text.lower().startswith(('page', '第'))):  # 排除分页信息
+                            real_title = heading_text
+                            logger.debug(f"从{tag_name}标签提取标题: '{real_title}'")
+                            break
+                    if real_title:
+                        break
+
+            # 方法2.5: 从strong标签或特定class获取
+            if not real_title or real_title.startswith('政策ID:'):
+                title_selectors = [
+                    'div.title', 'div.article-title', 'div.policy-title',
+                    'h4.title', 'strong', 'b', '.title'
+                ]
+                for selector in title_selectors:
+                    title_elements = detail_soup.select(selector)
+                    for element in title_elements:
+                        element_text = element.get_text(strip=True)
+                        logger.debug(f"尝试选择器 '{selector}' 找到文本: '{element_text}'")
+                        if (element_text and
+                            len(element_text) > 5 and
+                            len(element_text) < 150 and
+                            not element_text.isdigit() and
+                            '政策ID:' not in element_text and
+                            not element_text.startswith('http')):
+                            real_title = element_text
+                            break
+                    if real_title:
+                        break
+
+            # 方法3: 从页面meta标签获取
+            if not real_title or real_title.startswith('政策ID:'):
+                meta_title = detail_soup.find('meta', attrs={'property': 'og:title'}) or \
+                            detail_soup.find('meta', attrs={'name': 'title'})
+                if meta_title and meta_title.get('content'):
+                    meta_title_text = meta_title.get('content').strip()
+                    logger.debug(f"Meta title: '{meta_title_text}'")
+                    if len(meta_title_text) > 5 and len(meta_title_text) < 200:
+                        real_title = meta_title_text
+
+            # 方法4: 从特定的政策标题容器获取
+            if not real_title or real_title.startswith('政策ID:'):
+                # 尝试一些常见的政策标题容器
+                policy_title_selectors = [
+                    '.policy-title', '.document-title', '.article-title',
+                    '.content-title', '.main-title', '.header-title',
+                    '.doc-title', '.law-title'
+                ]
+                for selector in policy_title_selectors:
+                    title_elem = detail_soup.select_one(selector)
+                    if title_elem:
+                        title_text = title_elem.get_text(strip=True)
+                        logger.debug(f"政策标题容器 '{selector}' 找到: '{title_text}'")
+                        if (title_text and len(title_text) > 8 and len(title_text) < 200 and
+                            '政策ID:' not in title_text and not title_text.startswith('http')):
+                            real_title = title_text
+                            break
+
+            # 方法5: 从正文第一段获取可能的标题
+            if not real_title or real_title.startswith('政策ID:'):
+                # 查找正文内容的第一段，看是否包含标题信息
+                content_divs = detail_soup.select('div.content, div.article, div.detail, div.main-content, div.text')
+                for content_div in content_divs[:2]:  # 只检查前两个内容容器
+                    if content_div:
+                        # 获取前几段文字
+                        paragraphs = content_div.find_all('p')[:3]  # 前3段
+                        for p in paragraphs:
+                            p_text = p.get_text(strip=True)
+                            logger.debug(f"检查段落文本: '{p_text[:100]}...'")
+                            # 检查是否包含政策关键词且长度合适
+                            if (p_text and len(p_text) > 10 and len(p_text) < 150 and
+                                any(keyword in p_text for keyword in ['关于', '印发', '决定', '通知', '办法', '规定']) and
+                                '政策ID:' not in p_text):
+                                real_title = p_text
+                                logger.debug(f"从正文提取到标题: '{real_title}'")
+                                break
+                        if real_title:
+                            break
+
+            # 方法6: 从JavaScript变量获取（从网页分析发现shareTitle变量）
+            if not real_title or real_title.startswith('政策ID:'):
+                # 查找页面中的JavaScript变量，特别是shareTitle
+                scripts = detail_soup.find_all('script')
+                for script in scripts:
+                    script_text = script.get_text() if script else ""
+                    # 查找常见的标题变量模式，特别是shareTitle
+                    import re
+                    title_patterns = [
+                        r'var\s+shareTitle\s*=\s*["\']([^"\']+)["\']',  # shareTitle变量
+                        r'shareTitle\s*=\s*["\']([^"\']+)["\']',        # shareTitle赋值
+                        r'var\s+title\s*=\s*["\']([^"\']+)["\']',
+                        r'title\s*:\s*["\']([^"\']+)["\']',
+                        r'"title"\s*:\s*["\']([^"\']+)["\']',
+                        r'document\.title\s*=\s*["\']([^"\']+)["\']'
+                    ]
+                    for pattern in title_patterns:
+                        matches = re.findall(pattern, script_text, re.IGNORECASE)
+                        for match in matches:
+                            if (match and len(match) > 8 and len(match) < 200 and
+                                '政策ID:' not in match and not match.startswith('http')):
+                                logger.debug(f"从JavaScript变量提取到标题: '{match}'")
+                                real_title = match
+                                break
+                        if real_title:
+                            break
+                    if real_title:
+                        break
+
+            # 方法7: 从URL路径或其他meta信息推断标题
+            if not real_title or real_title.startswith('政策ID:'):
+                # 尝试从URL或其他方式生成一个描述性标题
+                # URL格式通常是: /gddigui/{policy_id}.html
+                url_parts = url.split('/')
+                if len(url_parts) >= 3:
+                    library = url_parts[-2]  # gddigui, gddifang 等
+                    policy_id = url_parts[-1].replace('.html', '')
+
+                    # 根据库类型生成标题
+                    library_names = {
+                        'gddigui': '广东省地方性法规',
+                        'gddifang': '广东省政府规章',
+                        'gdfgwj': '广东省规范性文件',
+                        'gdchinalaw': '中国法律法规',
+                        'regularation': '广东省行政规范性文件'
+                    }
+
+                    library_name = library_names.get(library, f'{library}政策文件')
+                    real_title = f'{library_name} - {policy_id[:16]}...'  # 使用部分ID作为标识
+                    logger.debug(f"从URL推断生成标题: '{real_title}'")
+
+            # 方法8: 从页面的data属性或其他自定义属性获取
+            if not real_title or real_title.startswith('政策ID:'):
+                # 查找页面中可能包含标题的data属性
+                elements_with_data = detail_soup.find_all(attrs={'data-title': True})
+                for elem in elements_with_data:
+                    data_title = elem.get('data-title', '').strip()
+                    if (data_title and len(data_title) > 5 and len(data_title) < 200 and
+                        '政策ID:' not in data_title):
+                        logger.debug(f"从data-title属性提取到标题: '{data_title}'")
+                        real_title = data_title
+                        break
+
+            # 方法9: 最后的备用方案 - 从内容中提取第一行作为标题
+            if not real_title or real_title.startswith('政策ID:'):
+                if content:
+                    # 从内容中提取第一行或第一段作为标题
+                    lines = content.split('\n')[:5]  # 前5行
+                    for line in lines:
+                        line = line.strip()
+                        if (line and len(line) > 15 and len(line) < 100 and
+                            not line.startswith('http') and '政策ID:' not in line and
+                            any(keyword in line for keyword in ['关于', '印发', '决定', '通知', '办法', '规定', '实施', '意见'])):
+                            real_title = line
+                            logger.debug(f"从内容第一行提取标题: '{real_title}'")
+                            break
+
+            # 方法10: 直接从页面文本内容提取标题（最直接的方法）
+            if not real_title or real_title.startswith('政策ID:'):
+                # 获取页面所有可见文本，从开头查找可能的标题
+                all_visible_text = detail_soup.get_text(separator=' ', strip=True)
+                logger.debug(f"页面总文本长度: {len(all_visible_text)}")
+
+                # 按句子或段落分割
+                text_parts = all_visible_text.split('。')[:10]  # 前10个句子
+
+                for part in text_parts:
+                    part = part.strip()
+                    logger.debug(f"检查文本段: '{part[:50]}...'")
+
+                    # 查找包含政策关键词且长度合适的文本
+                    if (part and len(part) > 15 and len(part) < 150 and
+                        any(keyword in part for keyword in ['关于', '印发', '决定', '通知', '办法', '规定', '实施', '意见']) and
+                        not part.startswith('http') and '政策ID:' not in part):
+                        real_title = part
+                        logger.debug(f"从页面文本提取标题: '{real_title}'")
+                        break
+
+            # 如果所有方法都失败了，输出详细的调试信息
+            if not real_title or real_title.startswith('政策ID:'):
+                logger.warning(f"⚠️ 所有标题提取方法都失败了！")
+                logger.warning(f"详情页面URL: {url}")
+                logger.warning(f"HTML文档标题标签数量: {len(detail_soup.find_all('title'))}")
+                logger.warning(f"HTML文档input标签数量: {len(detail_soup.find_all('input'))}")
+                article_inputs = detail_soup.find_all('input', {'id': 'ArticleTitle'})
+                logger.warning(f"ArticleTitle输入框数量: {len(article_inputs)}")
+                if article_inputs:
+                    for i, inp in enumerate(article_inputs):
+                        logger.warning(f"  ArticleTitle[{i}] value: '{inp.get('value', 'NO_VALUE')}'")
+                else:
+                    logger.warning("  未找到任何ArticleTitle输入框")
+
+                # 检查其他可能的标题来源
+                h2_titles = detail_soup.find_all('h2', class_='title')
+                logger.warning(f"h2.title标签数量: {len(h2_titles)}")
+                for i, h2 in enumerate(h2_titles):
+                    logger.warning(f"  h2.title[{i}]: '{h2.get_text(strip=True)}'")
+
+                mtitle_elements = detail_soup.find_all(class_='MTitle')
+                logger.warning(f".MTitle元素数量: {len(mtitle_elements)}")
+                for i, mtitle in enumerate(mtitle_elements):
+                    logger.warning(f"  .MTitle[{i}]: '{mtitle.get_text(strip=True)}'")
+
+            # 提取内容
+            content_selectors = [
+                'div.content', 'div.article', 'div.detail', 'div.main-content',
+                'div.text', 'div.article-content', 'div.policy-content'
+            ]
+
+            for selector in content_selectors:
+                content_div = detail_soup.select_one(selector)
+                if content_div:
+                    # 移除脚本和样式元素
+                    for script in content_div(["script", "style"]):
+                        script.decompose()
+
+                    text = content_div.get_text(separator='\n', strip=True)
+                    if text and len(text) > 100:  # 内容至少100字符
+                        content = text
+                        break
+
+            # 如果没找到内容，尝试整个body
+            if not content:
+                body = detail_soup.find('body')
+                if body:
+                    for script in body(["script", "style", "nav", "header", "footer"]):
+                        script.decompose()
+                    text = body.get_text(separator='\n', strip=True)
+                    if text and len(text) > 100:
+                        content = text
+
+            return content, real_title
+
+        except Exception as e:
+            logger.warning(f"提取详情内容和标题失败: {e}")
+            return "", ""
+
     def _is_policy_item(self, item):
         """判断是否为政策项目"""
         # 更宽松的判断条件，只要包含链接或文本内容就认为是政策项目
@@ -2384,11 +2977,294 @@ class GuangdongSpider(EnhancedBaseCrawler):
         if link in ('', '/', '#', 'javascript:void(0)', 'javascript:void(0);'):
             return True
 
-        # 只保留以.html结尾的URL（政策详情页通常是.html格式）
-        if not link.endswith('.html'):
-            return True
+    def _get_category_api_config(self, category_code: str) -> Dict[str, str]:
+        """根据分类代码获取对应的API配置
 
-        return False
+        Args:
+            category_code: 分类代码
+
+        Returns:
+            dict: 包含 search_url, menu, library, class_flag, init_page, referer
+        """
+        # 确定API类型
+        api_type = None
+        for code_prefix, api_name in CATEGORY_API_MAP.items():
+            if category_code and category_code.startswith(code_prefix):
+                api_type = api_name
+                break
+
+        # 默认使用dfzfgz接口
+        if not api_type:
+            api_type = 'dfzfgz'
+            logger.warning(f"未找到分类代码 {category_code} 的API映射，使用默认接口: {api_type}")
+
+        # 从映射表获取配置
+        api_config = API_PATH_MAP[api_type].copy()
+        api_config.update({
+            'search_url': f"{self.base_url}/{api_type}/search/RecordSearch",
+            'init_page': f"{self.base_url}/{api_type}/adv",
+            'referer': f'https://gd.pkulaw.com/{api_type}/adv'
+        })
+
+        return api_config
+
+    def extract_years_from_page(self, html_content: str) -> List[Tuple[int, int]]:
+        """从页面HTML中提取可用的公布年份及其数量
+
+        年份筛选器位于 <div class="block" cluster_index="6"> 中
+        每个年份链接格式: <a href="javascript:void(0);" cluster_code="2021">2021 (70)</a>
+
+        Args:
+            html_content: 页面HTML内容
+
+        Returns:
+            List[Tuple[int, int]]: [(年份, 数量), ...] 按年份倒序排列
+        """
+        years = []
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            import re
+
+            # 方法1: 查找 cluster_index="6" 的block（公布年份筛选器）
+            year_block = soup.find('div', class_='block', attrs={'cluster_index': '6'})
+            if year_block:
+                # 在block中查找所有年份链接（包括被隐藏的）
+                year_links = year_block.find_all('a', cluster_code=True)
+                year_pattern = re.compile(r'(\d{4})\s*\((\d+)\)')
+
+                for link in year_links:
+                    cluster_code = link.get('cluster_code', '')
+                    text = link.get_text(strip=True)
+                    match = year_pattern.search(text)
+                    if match:
+                        year = int(match.group(1))
+                        count = int(match.group(2))
+                        # cluster_code 应该等于年份
+                        if cluster_code.isdigit() and int(cluster_code) == year:
+                            years.append((year, count))
+
+            # 方法2: 如果方法1失败，尝试查找 cluster_index="3"
+            if not years:
+                year_block = soup.find('div', class_='block', attrs={'cluster_index': '3'})
+                if year_block:
+                    h4 = year_block.find('h4', class_='filter-title')
+                    if h4 and '公布年份' in h4.get_text():
+                        year_links = year_block.find_all('a', cluster_code=True)
+                        year_pattern = re.compile(r'(\d{4})\s*\((\d+)\)')
+
+                        for link in year_links:
+                            cluster_code = link.get('cluster_code', '')
+                            text = link.get_text(strip=True)
+                            match = year_pattern.search(text)
+                            if match:
+                                year = int(match.group(1))
+                                count = int(match.group(2))
+                                if cluster_code.isdigit() and int(cluster_code) == year:
+                                    years.append((year, count))
+
+            # 方法3: 通过"公布年份"标题查找
+            if not years:
+                year_title = soup.find(string=re.compile(r'公布年份'))
+                if year_title:
+                    # 查找父级block
+                    parent_block = year_title.find_parent('div', class_='block')
+                    if parent_block:
+                        year_links = parent_block.find_all('a', cluster_code=True)
+                        year_pattern = re.compile(r'(\d{4})\s*\((\d+)\)')
+
+                        for link in year_links:
+                            cluster_code = link.get('cluster_code', '')
+                            text = link.get_text(strip=True)
+                            match = year_pattern.search(text)
+                            if match:
+                                year = int(match.group(1))
+                                count = int(match.group(2))
+                                if cluster_code.isdigit() and int(cluster_code) == year:
+                                    years.append((year, count))
+
+            # 方法4: 更宽泛的搜索
+            if not years:
+                all_links = soup.find_all('a', cluster_code=True)
+                year_pattern = re.compile(r'(\d{4})\s*\((\d+)\)')
+                for link in all_links:
+                    cluster_code = link.get('cluster_code', '')
+                    text = link.get_text(strip=True)
+                    match = year_pattern.search(text)
+                    if match:
+                        year = int(match.group(1))
+                        count = int(match.group(2))
+                        # 验证cluster_code是否为4位数字且等于年份
+                        if cluster_code.isdigit() and len(cluster_code) == 4 and int(cluster_code) == year:
+                            years.append((year, count))
+
+        except Exception as e:
+            logger.warning(f"提取年份信息失败: {e}")
+
+        return sorted(years, reverse=True)  # 按年份倒序排列
+
+    def _crawl_category_with_year_split(self, category_name: str, category_code: str, callback=None, stop_callback=None, policy_callback=None):
+        """使用年份分割策略爬取单个分类
+
+        Args:
+            category_name: 分类名称
+            category_code: 分类代码
+            callback: 进度回调函数
+            stop_callback: 停止回调函数
+            policy_callback: 政策数据回调函数
+        """
+        logger.info(f"开始年份分割爬取: {category_name} (代码: {category_code})")
+
+        # 第一步：获取该分类的年份信息
+        api_config = self._get_category_api_config(category_code)
+        years_info = []
+
+        try:
+            # 访问分类的搜索页面获取年份信息
+            adv_url = api_config.get('init_page', f"{self.base_url}/{api_config['menu']}/adv")
+            headers = self.headers.copy()
+            if api_config.get('referer'):
+                headers['Referer'] = api_config['referer']
+
+            resp = self.session.get(adv_url, headers=headers, timeout=15)
+            if resp.status_code == 200:
+                years_info = self.extract_years_from_page(resp.text)
+                if years_info:
+                    logger.info(f"分类 {category_name} 找到 {len(years_info)} 个年份: {', '.join([f'{y[0]}年({y[1]}条)' for y in years_info[:10]])}")
+                else:
+                    logger.warning(f"分类 {category_name} 未找到年份信息，将进行全量爬取")
+            else:
+                logger.warning(f"获取分类 {category_name} 年份信息失败: {resp.status_code}")
+
+        except Exception as e:
+            logger.warning(f"获取分类 {category_name} 年份信息异常: {e}")
+
+        # 第二步：为每个年份创建爬取任务
+        all_policies = []
+
+        if years_info:
+            # 有年份信息，按年份分割爬取
+            logger.info(f"分类 {category_name} 使用年份分割策略，共 {len(years_info)} 个年份任务")
+
+            for year, expected_count in years_info:
+                if stop_callback and stop_callback():
+                    logger.info("用户已停止爬取")
+                    break
+
+                logger.info(f"正在爬取 {category_name} - {year}年 (预计 {expected_count} 条)")
+
+                if callback:
+                    callback(f"正在爬取 {category_name} - {year}年")
+
+                # 爬取该年份的数据
+                year_policies = self._crawl_category_year(category_name, category_code, year, expected_count, callback, stop_callback, policy_callback)
+
+                if year_policies:
+                    all_policies.extend(year_policies)
+                    logger.info(f"{category_name} - {year}年 获取到 {len(year_policies)} 条政策")
+                else:
+                    logger.warning(f"{category_name} - {year}年 未获取到政策数据")
+        else:
+            # 没有年份信息，全量爬取
+            logger.info(f"分类 {category_name} 无年份信息，进行全量爬取")
+
+            if callback:
+                callback(f"正在全量爬取 {category_name}")
+
+            year_policies = self._crawl_category_year(category_name, category_code, None, None, callback, stop_callback, policy_callback)
+
+            if year_policies:
+                all_policies.extend(year_policies)
+                logger.info(f"{category_name} 全量爬取获取到 {len(year_policies)} 条政策")
+
+        logger.info(f"分类 {category_name} 年份分割爬取完成，共获取 {len(all_policies)} 条政策")
+        return all_policies
+
+    def _crawl_category_year(self, category_name: str, category_code: str, year: Optional[int], expected_count: Optional[int],
+                           callback=None, stop_callback=None, policy_callback=None):
+        """爬取分类的指定年份数据
+
+        Args:
+            category_name: 分类名称
+            category_code: 分类代码
+            year: 年份（None表示全量）
+            expected_count: 预期数量
+            callback: 进度回调函数
+            stop_callback: 停止回调函数
+            policy_callback: 政策数据回调函数
+        """
+        year_info = f" - {year}年" if year else " - 全量"
+        logger.debug(f"开始爬取 {category_name}{year_info}")
+
+        policies = []
+        page_index = 1
+        max_pages = 999999  # 无上限
+        empty_page_count = 0
+        max_empty_pages = 20  # 连续空页数限制
+
+        api_config = self._get_category_api_config(category_code)
+
+        # 设置当前API配置，用于_parse_policy_list_html方法
+        self.current_api_config = api_config
+
+        while page_index <= max_pages and empty_page_count < max_empty_pages:
+            if stop_callback and stop_callback():
+                logger.info("用户已停止爬取")
+                break
+
+            try:
+                # 构建搜索参数
+                post_data = self._get_search_parameters(
+                    keywords=None,
+                    category_code=category_code,
+                    page_index=page_index,
+                    page_size=20,
+                    start_date=None,
+                    end_date=None,
+                    filter_year=year
+                )
+
+                headers = self.headers.copy()
+
+                resp, request_info = self.post_page(
+                    self.search_url,
+                    data=post_data,
+                    headers=headers
+                )
+
+                if resp and resp.status_code == 200:
+                    self.monitor.record_request(self.search_url, success=True)
+
+                    # 解析页面政策
+                    page_policies = self._parse_policy_list_html(resp.text, callback, stop_callback, category_name, policy_callback)
+
+                    if page_policies:
+                        policies.extend(page_policies)
+                        empty_page_count = 0
+
+                        if callback:
+                            callback(f"{category_name}{year_info} 第 {page_index} 页获取 {len(page_policies)} 条政策")
+                    else:
+                        empty_page_count += 1
+                        if empty_page_count >= max_empty_pages:
+                            logger.info(f"{category_name}{year_info} 连续 {max_empty_pages} 页无数据，停止翻页")
+                            break
+                else:
+                    error_msg = f"HTTP {resp.status_code}" if resp else "请求失败"
+                    self.monitor.record_request(self.search_url, success=False, error_type=error_msg)
+                    logger.warning(f"{category_name}{year_info} 第 {page_index} 页请求失败: {error_msg}")
+                    empty_page_count += 1
+
+            except Exception as e:
+                logger.error(f"{category_name}{year_info} 第 {page_index} 页处理失败: {e}", exc_info=True)
+                empty_page_count += 1
+
+            page_index += 1
+
+            # 添加延时
+            time.sleep(1)
+
+        logger.debug(f"{category_name}{year_info} 爬取完成，共获取 {len(policies)} 条政策")
+        return policies
 
     def _parse_policy_info(self, info_text):
         """解析政策信息文本"""
@@ -2497,164 +3373,83 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 获取所有分类（使用扁平化列表）
         categories = self._get_flat_categories()
         logger.info(f"找到 {len(categories)} 个分类")
-        
+
         all_policies = []
-        
-        # 遍历所有分类进行爬取
-        logger.info("开始尝试多种搜索策略...")
+
+        # 使用年份分割策略遍历所有分类进行爬取
+        logger.info("开始年份分割分类爬取...")
         if callback:
-            callback("开始尝试多种搜索策略...")
-        
-        strategy_policies = self._try_different_search_strategies(keywords, callback, stop_callback, policy_callback)
-        if strategy_policies:
-            all_policies.extend(strategy_policies)
-            logger.info(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
-            if callback:
-                callback(f"通过搜索策略获取到 {len(strategy_policies)} 条政策")
-        
-        # 然后遍历所有分类进行传统爬取
-        logger.info("开始传统分类爬取...")
-        if callback:
-            callback("开始传统分类爬取...")
-        
+            callback("开始年份分割分类爬取...")
+
         for category_name, category_code in categories:
             if stop_callback and stop_callback():
                 logger.info("用户已停止爬取")
                 break
-                
-            logger.info(f"正在爬取分类: {category_name} (代码: {category_code})")
+
+            logger.info(f"正在使用年份分割策略爬取分类: {category_name} (代码: {category_code})")
             if callback:
-                callback(f"正在爬取分类: {category_name}")
-            
-            # 爬取当前分类的所有页面
-            page_index = 1
-            max_pages = 999999  # 最大页数限制（无上限）
-            category_policies = []
-            empty_page_count = 0  # 连续空页计数
-            max_empty_pages = 10   # 最大连续空页数（增加容忍度）
-            
-            while page_index <= max_pages and empty_page_count < max_empty_pages:
-                if stop_callback and stop_callback():
-                    logger.info("用户已停止爬取")
-                    break
-                    
-                try:
-                    # 使用基于网站分析的搜索参数
-                    post_data = self._get_search_parameters(
-                        keywords=keywords,
-                        category_code=category_code,
-                        page_index=page_index,
-                        page_size=20,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    search_keyword = ' '.join(keywords) if keywords else ''
-                    logger.debug(f"搜索关键词: '{search_keyword}', 分类: {category_code}, 页码: {page_index}")
-                    
-                    headers = self.headers.copy()
-                    
-                    resp, request_info = self.post_page(
-                        self.search_url,
-                        data=post_data,
-                        headers=headers
-                    )
-                    
-                    if resp and resp.status_code == 200:
-                        self.monitor.record_request(self.search_url, success=True)
-                        # 使用HTML解析而不是JSON解析，传递 policy_callback 实现流动显示
-                        page_policies = self._parse_policy_list_html(resp.text, callback, stop_callback, category_name, policy_callback)
-                    else:
-                        error_msg = f"HTTP {resp.status_code}" if resp else "请求失败"
-                        self.monitor.record_request(self.search_url, success=False, error_type=error_msg)
-                        logger.warning(f"请求失败: {error_msg}")
-                        break
-                    
-                    if len(page_policies) == 0:
-                        empty_page_count += 1
-                        logger.debug(f"分类[{category_name}] 第 {page_index} 页未获取到政策，连续空页: {empty_page_count}")
-                        if empty_page_count >= max_empty_pages:
-                            logger.info(f"分类[{category_name}] 连续 {max_empty_pages} 页无数据，停止翻页")
-                            break
-                    else:
-                        empty_page_count = 0  # 重置空页计数
-                    
-                    # 更新总爬取数量
-                    total_crawled += len(page_policies)
-                    
+                callback(f"正在使用年份分割策略爬取分类: {category_name}")
+
+            # 使用年份分割策略爬取当前分类
+            # 设置当前API配置，用于_parse_policy_list_html方法
+            api_config = self._get_category_api_config(category_code)
+            self.current_api_config = api_config
+
+            category_policies = self._crawl_category_with_year_split(
+                category_name, category_code, callback, stop_callback, policy_callback
+            )
+
+            # 更新总爬取数量
+            total_crawled += len(category_policies)
+
+            # 过滤关键词、时间并发送政策数据信号
+            filtered_policies = []
+            for policy in category_policies:
+                # 关键词过滤
+                if keywords and not self._is_policy_match_keywords(policy, keywords):
+                    continue
+
+                # 时间过滤
+                if enable_time_filter:
+                    if self._is_policy_in_date_range(policy, dt_start, dt_end):
+                        filtered_policies.append(policy)
+                        # 调用 policy_callback 实时返回政策数据
+                        if policy_callback:
+                            try:
+                                policy_callback(policy)
+                            except Exception as cb_error:
+                                logger.warning(f"调用 policy_callback 失败: {cb_error}")
+                        # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
+                        if callback:
+                            callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
+                else:
+                    # 不启用时间过滤，直接包含所有政策
+                    filtered_policies.append(policy)
+                    # 调用 policy_callback 实时返回政策数据
+                    if policy_callback:
+                        try:
+                            policy_callback(policy)
+                        except Exception as cb_error:
+                            logger.warning(f"调用 policy_callback 失败: {cb_error}")
+                    # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
                     if callback:
-                        callback(f"分类[{category_name}] 第 {page_index} 页获取 {len(page_policies)} 条政策（累计爬取: {total_crawled} 条）")
-                    
-                    # 过滤关键词、时间并发送政策数据信号
-                    filtered_policies = []
-                    for policy in page_policies:
-                        # 关键词过滤
-                        if keywords and not self._is_policy_match_keywords(policy, keywords):
-                            continue
-                        
-                        # 时间过滤
-                        if enable_time_filter:
-                            if self._is_policy_in_date_range(policy, dt_start, dt_end):
-                                filtered_policies.append(policy)
-                                # 调用 policy_callback 实时返回政策数据
-                                if policy_callback:
-                                    try:
-                                        policy_callback(policy)
-                                    except Exception as cb_error:
-                                        logger.warning(f"调用 policy_callback 失败: {cb_error}")
-                                # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
-                                if callback:
-                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
-                        else:
-                            # 不启用时间过滤，直接包含所有政策
-                            filtered_policies.append(policy)
-                            # 调用 policy_callback 实时返回政策数据
-                            if policy_callback:
-                                try:
-                                    policy_callback(policy)
-                                except Exception as cb_error:
-                                    logger.warning(f"调用 policy_callback 失败: {cb_error}")
-                            # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
-                            if callback:
-                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
-                    
-                    # 更新过滤后数量
-                    total_filtered += len(filtered_policies)
-                    
-                    if callback:
-                        if enable_time_filter:
-                            callback(f"分类[{category_name}] 第 {page_index} 页过滤后保留 {len(filtered_policies)} 条政策（累计过滤后: {total_filtered} 条）")
-                        else:
-                            callback(f"分类[{category_name}] 第 {page_index} 页保留 {len(filtered_policies)} 条政策（累计: {total_filtered} 条）")
-                    
-                    all_policies.extend(filtered_policies)
-                    category_policies.extend(filtered_policies)
-                    
-                    # 检查是否到达最大页数
-                    if page_index >= max_pages:
-                        logger.info(f"分类[{category_name}] 已到达最大页数限制 ({max_pages} 页)，停止翻页")
-                        break
-                    
-                    page_index += 1
-                    
-                    # 添加延时
-                    if not disable_speed_limit:
-                        delay = random.uniform(*delay_range)
-                        time.sleep(delay)
-                        
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"请求失败: {e}", exc_info=True)
-                    self.monitor.record_request(self.search_url, success=False, error_type=str(type(e).__name__))
-                    break
-                except Exception as e:
-                    logger.error(f"请求未知错误: {e}", exc_info=True)
-                    self.monitor.record_request(self.search_url, success=False, error_type="unknown")
-                    break
-            
+                        callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
+
+            # 更新过滤后数量
+            total_filtered += len(filtered_policies)
+
+            if callback:
+                if enable_time_filter:
+                    callback(f"分类[{category_name}] 年份分割爬取完成，过滤后保留 {len(filtered_policies)} 条政策（累计过滤后: {total_filtered} 条）")
+                else:
+                    callback(f"分类[{category_name}] 年份分割爬取完成，保留 {len(filtered_policies)} 条政策（累计: {total_filtered} 条）")
+
+            all_policies.extend(filtered_policies)
+
             # 显示当前分类的统计信息
-            logger.info(f"分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
+            logger.info(f"分类[{category_name}] 年份分割爬取完成，共获取 {len(category_policies)} 条原始政策，过滤后保留 {len(filtered_policies)} 条")
             if callback:
-                callback(f"分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
+                callback(f"分类[{category_name}] 年份分割爬取完成，共获取 {len(category_policies)} 条原始政策，过滤后保留 {len(filtered_policies)} 条")
         
         # 应用去重机制
         logger.info("应用数据去重...")
@@ -2748,7 +3543,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             page_index = 1
             max_pages = 999999  # 最大页数限制（无上限）
             empty_page_count = 0
-            max_empty_pages = 10  # 增加连续空页容忍度，避免过早停止
+            max_empty_pages = 20  # 大幅增加连续空页容忍度，避免过早停止
             
             while page_index <= max_pages and empty_page_count < max_empty_pages:
                 if stop_callback and stop_callback():
@@ -2913,219 +3708,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             logger.warning(f"策略1解析失败: {e}", exc_info=True)
         except Exception as e:
             logger.error(f"策略1失败: {e}", exc_info=True)
-            if callback:
-                callback(f"策略1失败，尝试策略2...")
         
-        # 策略2：尝试不同的搜索参数组合
-        if len(all_policies) < 10000:  # 如果数据量不够，尝试策略2
-            try:
-                logger.info("策略2：尝试不同的搜索参数组合...")
-                if callback:
-                    callback("策略2：尝试不同的搜索参数组合...")
-                
-                # 使用不同的页面大小
-                page_size_2 = 100  # 尝试更大的页面大小
-                page_index_2 = 1
-                empty_page_count_2 = 0
-                max_empty_pages_2 = 15  # 进一步增加容忍度
-                
-                while page_index_2 <= 500 and empty_page_count_2 < max_empty_pages_2:  # 限制500页避免无限循环
-                    if stop_callback and stop_callback():
-                        logger.info("用户已停止爬取")
-                        break
-                    
-                    try:
-                        # 使用不同的搜索参数
-                        post_data_2 = self._get_search_parameters(
-                            keywords=keywords,
-                            category_code=None,
-                            page_index=page_index_2,
-                            page_size=page_size_2,
-                            start_date=start_date,
-                            end_date=end_date,
-                            old_page_index=page_index_2 - 1 if page_index_2 > 1 else None
-                        )
-                        
-                        search_keyword = ' '.join(keywords) if keywords else ''
-                        logger.debug(f"策略2搜索: '{search_keyword}', 页码: {page_index_2}, 页面大小: {page_size_2}")
-                        if callback:
-                            callback(f"策略2：正在请求第 {page_index_2} 页...")
-                        
-                        # 从post_data_2中提取category_code
-                        category_code_from_params_2 = None
-                        class_code_key_2 = post_data_2.get('ClassCodeKey', '')
-                        if class_code_key_2 and class_code_key_2.count(',') >= 4:
-                            parts_2 = class_code_key_2.split(',')
-                            if len(parts_2) >= 4 and parts_2[3]:
-                                category_code_from_params_2 = parts_2[3]
-                        resp_2 = self._request_page_with_check(page_index_2, post_data_2, page_index_2 - 1 if page_index_2 > 1 else None, category_code=category_code_from_params_2)
-                        
-                        if not resp_2:
-                            logger.warning(f"策略2第{page_index_2}页请求失败")
-                            break
-                        
-                        soup_2 = BeautifulSoup(resp_2.content, 'html.parser')
-                        page_policies_2 = self._parse_policy_list_optimized(soup_2, callback, stop_callback, "策略2搜索")
-                        
-                        if len(page_policies_2) == 0:
-                            empty_page_count_2 += 1
-                            logger.debug(f"策略2第 {page_index_2} 页未获取到政策，连续空页: {empty_page_count_2}")
-                            if empty_page_count_2 >= max_empty_pages_2:
-                                logger.info(f"策略2连续 {max_empty_pages_2} 页无数据，停止翻页")
-                                break
-                        else:
-                            empty_page_count_2 = 0
-                        
-                        total_crawled += len(page_policies_2)
-                        
-                        # 策略2的会话轮换逻辑
-                        session_rotation_counter += 1
-                        if session_rotation_counter >= max_requests_per_session:
-                            logger.debug(f"策略2已请求 {session_rotation_counter} 次，轮换会话...")
-                            if self._rotate_session():
-                                session_rotation_counter = 0
-                                logger.info("策略2会话轮换成功")
-                            else:
-                                logger.warning("策略2会话轮换失败，继续使用当前会话")
-                        
-                        if callback:
-                            callback(f"策略2第 {page_index_2} 页获取 {len(page_policies_2)} 条政策（累计爬取: {total_crawled} 条）")
-                        
-                        # 过滤和添加政策
-                        filtered_policies_2 = []
-                        for policy in page_policies_2:
-                            if keywords and not self._is_policy_match_keywords(policy, keywords):
-                                continue
-                            
-                            if enable_time_filter:
-                                if self._is_policy_in_date_range(policy, dt_start, dt_end):
-                                    filtered_policies_2.append(policy)
-                            else:
-                                filtered_policies_2.append(policy)
-                        
-                        total_filtered += len(filtered_policies_2)
-                        all_policies.extend(filtered_policies_2)
-                        
-                        if callback:
-                            callback(f"策略2第 {page_index_2} 页保留 {len(filtered_policies_2)} 条政策（累计: {total_filtered} 条）")
-                        
-                        page_index_2 += 1
-                        
-                        if not disable_speed_limit:
-                            delay = random.uniform(*delay_range)
-                            time.sleep(delay)
-                            
-                    except Exception as e:
-                        logger.error(f"策略2请求失败: {e}", exc_info=True)
-                        break
-                
-                logger.info(f"策略2完成，累计获取 {len(all_policies)} 条政策")
-                if callback:
-                    callback(f"策略2完成，累计获取 {len(all_policies)} 条政策")
-                    
-            except requests.exceptions.RequestException as e:
-                logger.error(f"策略2请求失败: {e}", exc_info=True)
-            except (ValueError, KeyError, AttributeError) as e:
-                logger.warning(f"策略2解析失败: {e}", exc_info=True)
-            except Exception as e:
-                logger.error(f"策略2失败: {e}", exc_info=True)
-                if callback:
-                    callback(f"策略2失败，继续处理已获取的数据...")
-        
-        # 策略3：如果数据量仍然不够，尝试分类遍历
-        if len(all_policies) < 15000:  # 如果数据量仍然不够，尝试分类遍历
-            try:
-                logger.info("策略3：尝试分类遍历获取更多数据...")
-                if callback:
-                    callback("策略3：尝试分类遍历获取更多数据...")
-                
-                # 获取所有分类
-                categories = self._get_flat_categories()
-                logger.info(f"找到 {len(categories)} 个分类")
-                
-                for category_name, category_code in categories:
-                    if stop_callback and stop_callback():
-                        break
-                    
-                    if callback:
-                        callback(f"策略3：正在爬取分类 {category_name}...")
-                    
-                    # 为每个分类爬取数据
-                    category_policies = []
-                    page_index_3 = 1
-                    empty_page_count_3 = 0
-                    max_empty_pages_3 = 8
-                    
-                    while page_index_3 <= 100 and empty_page_count_3 < max_empty_pages_3:  # 每个分类最多100页
-                        try:
-                            post_data_3 = self._get_search_parameters(
-                                keywords=keywords,
-                                category_code=category_code,
-                                page_index=page_index_3,
-                                page_size=20,
-                                start_date=start_date,
-                                end_date=end_date
-                            )
-                            
-                            resp_3 = self._request_page_with_check(page_index_3, post_data_3, page_index_3 - 1 if page_index_3 > 1 else None, category_code=category_code)
-                            
-                            if not resp_3:
-                                break
-                            
-                            soup_3 = BeautifulSoup(resp_3.content, 'html.parser')
-                            page_policies_3 = self._parse_policy_list_optimized(soup_3, callback, stop_callback, category_name)
-                            
-                            if len(page_policies_3) == 0:
-                                empty_page_count_3 += 1
-                                if empty_page_count_3 >= max_empty_pages_3:
-                                    break
-                            else:
-                                empty_page_count_3 = 0
-                            
-                            # 过滤和添加政策
-                            for policy in page_policies_3:
-                                if keywords and not self._is_policy_match_keywords(policy, keywords):
-                                    continue
-                                
-                                if enable_time_filter:
-                                    if self._is_policy_in_date_range(policy, dt_start, dt_end):
-                                        category_policies.append(policy)
-                                else:
-                                    category_policies.append(policy)
-                            
-                            if callback:
-                                callback(f"策略3分类[{category_name}]第{page_index_3}页获取{len(page_policies_3)}条政策")
-                            
-                            page_index_3 += 1
-                            
-                            if not disable_speed_limit:
-                                delay = random.uniform(*delay_range)
-                                time.sleep(delay)
-                                
-                        except Exception as e:
-                            logger.error(f"策略3分类[{category_name}]请求失败: {e}", exc_info=True)
-                            break
-                    
-                    # 添加分类政策到总列表
-                    all_policies.extend(category_policies)
-                    total_crawled += len(category_policies)
-                    total_filtered += len(category_policies)
-                    
-                    if callback:
-                        callback(f"策略3分类[{category_name}]完成，获取{len(category_policies)}条政策")
-                
-                logger.info(f"策略3完成，累计获取 {len(all_policies)} 条政策")
-                if callback:
-                    callback(f"策略3完成，累计获取 {len(all_policies)} 条政策")
-                    
-            except requests.exceptions.RequestException as e:
-                logger.error(f"策略3请求失败: {e}", exc_info=True)
-            except (ValueError, KeyError, AttributeError) as e:
-                logger.warning(f"策略3解析失败: {e}", exc_info=True)
-            except Exception as e:
-                logger.error(f"策略3失败: {e}", exc_info=True)
-                if callback:
-                    callback(f"策略3失败，继续处理已获取的数据...")
         
         # 应用去重机制
         logger.info("应用数据去重...")
@@ -3289,19 +3872,20 @@ class GuangdongMultiThreadSpider(MultiThreadBaseCrawler):
         
         try:
             if callback:
-                callback(f"线程 {thread_name} 使用成功的高级搜索策略...")
-            
-            # 使用单线程成功的搜索策略
-            strategy_policies = temp_spider._try_different_search_strategies(
-                keywords=None,  # 不使用关键词，获取所有政策
-                callback=callback,
-                stop_callback=lambda: self.check_stop() if hasattr(self, 'check_stop') else False
+                callback(f"线程 {thread_name} 使用年份分割策略爬取 {description}...")
+
+            # 使用年份分割策略
+            category_policies = temp_spider._crawl_category_with_year_split(
+                category_name,
+                task_data.get('category_code', ''),
+                callback,
+                lambda: self.check_stop() if hasattr(self, 'check_stop') else False
             )
-            
-            if strategy_policies:
-                policies.extend(strategy_policies)
+
+            if category_policies:
+                policies.extend(category_policies)
                 if callback:
-                    callback(f"线程 {thread_name} 获取到 {len(strategy_policies)} 条政策")
+                    callback(f"线程 {thread_name} 获取到 {len(category_policies)} 条政策")
             else:
                 if callback:
                     callback(f"线程 {thread_name} 未获取到政策")
