@@ -10,8 +10,8 @@ import time
 import random
 import threading
 from datetime import datetime
-from typing import List, Dict, Optional, Callable, Any, Tuple
-from urllib.parse import urljoin, urlparse
+from typing import List, Dict, Optional, Callable, Tuple
+from urllib.parse import urljoin
 import logging
 
 from bs4 import BeautifulSoup
@@ -325,22 +325,22 @@ class GuangdongSpider(EnhancedBaseCrawler):
                             # 如果校验失败，等待后重试整个流程
                             retry_count += 1
                             if retry_count < max_retries:
-                                logger.warning(f"翻页校验失败，重试整个流程...")
+                                logger.warning("翻页校验失败，重试整个流程...")
                                 time.sleep(3)
                                 continue
                             else:
-                                logger.warning(f"翻页校验达到最大重试次数，尝试跳过校验直接请求数据")
+                                logger.warning("翻页校验达到最大重试次数，尝试跳过校验直接请求数据")
                     except Exception as check_error:
                         self.monitor.record_request(check_url, success=False, error_type=str(check_error))
                         logger.error(f"翻页校验请求异常: {check_error}", exc_info=True)
                         # 校验异常时，等待后重试
                         retry_count += 1
                         if retry_count < max_retries:
-                            logger.warning(f"翻页校验异常，重试整个流程...")
+                            logger.warning("翻页校验异常，重试整个流程...")
                             time.sleep(3)
                             continue
                         else:
-                            logger.warning(f"翻页校验异常达到最大重试次数，尝试跳过校验直接请求数据")
+                            logger.warning("翻页校验异常达到最大重试次数，尝试跳过校验直接请求数据")
                 
                 # 2. 再请求数据接口（使用动态API配置）
                 search_url = api_config['search_url']
@@ -380,7 +380,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     
                     # 如果是403或429错误，尝试轮换会话
                     if search_resp and search_resp.status_code in [403, 429]:
-                        logger.warning(f"检测到访问限制，尝试轮换会话...")
+                        logger.warning("检测到访问限制，尝试轮换会话...")
                         if self._rotate_session():
                             logger.info("会话轮换成功，重试请求")
                             retry_count += 1
@@ -1071,27 +1071,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
         """
         logger.info(f"开始爬取广东省政策，关键词: {keywords}")
 
-        # 解析时间范围
-        dt_start = None
-        dt_end = None
-        enable_time_filter = False
-
+        # 解析时间范围（目前未使用，预留功能）
         if start_date and end_date:
             try:
-                dt_start = datetime.strptime(start_date, '%Y-%m-%d')
-                dt_end = datetime.strptime(end_date, '%Y-%m-%d')
-                enable_time_filter = True
-                logger.info(f"启用时间过滤: {start_date} 至 {end_date}")
+                logger.info(f"时间范围设置: {start_date} 至 {end_date}（过滤功能待实现）")
             except ValueError:
-                logger.warning(f"时间格式错误，禁用时间过滤")
+                logger.warning("时间格式错误，禁用时间过滤")
 
-        # 设置速度模式
-        if speed_mode == "快速模式":
-            delay_range = (0.1, 0.5)
-        elif speed_mode == "慢速模式":
-            delay_range = (2, 4)
-        else:  # 正常速度
-            delay_range = (1, 2)
+        # 设置速度模式（延迟控制已在循环中实现）
 
         # 获取所有分类
         categories = self._get_flat_categories()
@@ -1104,6 +1091,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         if callback:
             callback("开始传统分类爬取...")
 
+        page_index = 1
         for category_name, category_code in categories:
             if stop_callback and stop_callback():
                 logger.info("用户已停止爬取")
@@ -1277,236 +1265,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 这里批量详情获取是为了更新已发送的数据
         logger.info(f"china接口策略完成，共获取 {len(all_policies)} 条政策")
         return all_policies
-    
-    def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
-                      speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, policy_callback=None):
-        """爬取广东省政策
-        
-        Args:
-            keywords: 关键词列表
-            callback: 进度回调函数
-            start_date: 起始日期
-            end_date: 结束日期
-            speed_mode: 速度模式
-            disable_speed_limit: 是否禁用速度限制
-            stop_callback: 停止回调函数
-            policy_callback: 政策数据回调函数，每解析到一条政策时调用
-        """
-        logger.info(f"开始爬取广东省政策，关键词: {keywords}, 时间范围: {start_date} 至 {end_date}, policy_callback={'已设置' if policy_callback else '未设置'}")
-        
-        # 解析时间范围
-        dt_start = None
-        dt_end = None
-        enable_time_filter = False  # 是否启用时间过滤
-        
-        if start_date and end_date:
-            try:
-                dt_start = datetime.strptime(start_date, '%Y-%m-%d')
-                dt_end = datetime.strptime(end_date, '%Y-%m-%d')
-                enable_time_filter = True
-                logger.info(f"启用时间过滤: {start_date} 至 {end_date}")
-            except ValueError:
-                logger.warning(f"时间格式错误，禁用时间过滤")
-                enable_time_filter = False
-        else:
-            logger.info("未设置时间范围，禁用时间过滤")
-            enable_time_filter = False
-        
-        # 统计信息
-        total_crawled = 0  # 总爬取数量
-        total_filtered = 0  # 过滤后数量
-        total_saved = 0     # 最终保存数量
-        
-        # 设置速度模式
-        self.speed_mode = speed_mode
-        if speed_mode == "快速模式":
-            delay_range = (0.5, 1.5)
-        elif speed_mode == "慢速模式":
-            delay_range = (2, 4)
-        else:  # 正常速度
-            delay_range = (1, 2)
-        
-        # 获取所有分类（使用扁平化列表）
-        categories = self._get_flat_categories()
-        logger.info(f"找到 {len(categories)} 个分类")
-        
-        all_policies = []
-        
-        # 遍历所有分类进行年份分割爬取
-        logger.info("开始传统分类爬取...")
-        if callback:
-            callback("开始传统分类爬取...")
-        
-        for category_name, category_code in categories:
-            if stop_callback and stop_callback():
-                logger.info("用户已停止爬取")
-                break
-                
-            logger.info(f"正在爬取分类: {category_name} (代码: {category_code})")
-            if callback:
-                callback(f"正在爬取分类: {category_name}")
-            
-            # 爬取当前分类的所有页面
-            page_index = 1
-            max_pages = 999999  # 最大页数限制（无上限）
-            category_policies = []
-            empty_page_count = 0  # 连续空页计数
-            max_empty_pages = 20   # 最大连续空页数（大幅增加容忍度）
-            
-            while page_index <= max_pages and empty_page_count < max_empty_pages:
-                if stop_callback and stop_callback():
-                    logger.info("用户已停止爬取")
-                    break
-                    
-                try:
-                    # 使用基于网站分析的搜索参数
-                    post_data = self._get_search_parameters(
-                        keywords=keywords,
-                        category_code=category_code,
-                        page_index=page_index,
-                        page_size=20,
-                        start_date=start_date,
-                        end_date=end_date
-                    )
-                    
-                    search_keyword = ' '.join(keywords) if keywords else ''
-                    logger.debug(f"搜索关键词: '{search_keyword}', 分类: {category_code}, 页码: {page_index}")
-                    
-                    headers = self.headers.copy()
-                    
-                    resp, request_info = self.post_page(
-                        self.search_url,
-                        data=post_data,
-                        headers=headers
-                    )
-                    
-                    if resp and resp.status_code == 200:
-                        self.monitor.record_request(self.search_url, success=True)
-                        # 使用HTML解析而不是JSON解析，传递 policy_callback 实现流动显示
-                        page_policies = self._parse_policy_list_html(resp.text, callback, stop_callback, category_name, policy_callback)
-                    else:
-                        error_msg = f"HTTP {resp.status_code}" if resp else "请求失败"
-                        self.monitor.record_request(self.search_url, success=False, error_type=error_msg)
-                        logger.warning(f"请求失败: {error_msg}")
-                        break
-                    
-                    if len(page_policies) == 0:
-                        empty_page_count += 1
-                        logger.debug(f"分类[{category_name}] 第 {page_index} 页未获取到政策，连续空页: {empty_page_count}")
-                        if empty_page_count >= max_empty_pages:
-                            logger.info(f"分类[{category_name}] 连续 {max_empty_pages} 页无数据，停止翻页")
-                            break
-                    else:
-                        empty_page_count = 0  # 重置空页计数
-                    
-                    # 更新总爬取数量
-                    total_crawled += len(page_policies)
-                    
-                    if callback:
-                        callback(f"分类[{category_name}] 第 {page_index} 页获取 {len(page_policies)} 条政策（累计爬取: {total_crawled} 条）")
-                    
-                    # 过滤关键词、时间并发送政策数据信号
-                    filtered_policies = []
-                    for policy in page_policies:
-                        # 关键词过滤
-                        if keywords and not self._is_policy_match_keywords(policy, keywords):
-                            continue
-                        
-                        # 时间过滤
-                        if enable_time_filter:
-                            if self._is_policy_in_date_range(policy, dt_start, dt_end):
-                                filtered_policies.append(policy)
-                                # 调用 policy_callback 实时返回政策数据
-                                if policy_callback:
-                                    try:
-                                        policy_callback(policy)
-                                    except Exception as cb_error:
-                                        logger.warning(f"调用 policy_callback 失败: {cb_error}")
-                                # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
-                                if callback:
-                                    callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
-                        else:
-                            # 不启用时间过滤，直接包含所有政策
-                            filtered_policies.append(policy)
-                            # 调用 policy_callback 实时返回政策数据
-                            if policy_callback:
-                                try:
-                                    policy_callback(policy)
-                                except Exception as cb_error:
-                                    logger.warning(f"调用 policy_callback 失败: {cb_error}")
-                            # 发送政策数据信号，格式：POLICY_DATA:title|pub_date|source|content（兼容旧代码）
-                            if callback:
-                                callback(f"POLICY_DATA:{policy.get('title', '')}|{policy.get('pub_date', '')}|{policy.get('source', '')}|{policy.get('content', '')}")
-                    
-                    # 更新过滤后数量
-                    total_filtered += len(filtered_policies)
-                    
-                    if callback:
-                        if enable_time_filter:
-                            callback(f"分类[{category_name}] 第 {page_index} 页过滤后保留 {len(filtered_policies)} 条政策（累计过滤后: {total_filtered} 条）")
-                        else:
-                            callback(f"分类[{category_name}] 第 {page_index} 页保留 {len(filtered_policies)} 条政策（累计: {total_filtered} 条）")
-                    
-                    all_policies.extend(filtered_policies)
-                    category_policies.extend(filtered_policies)
-                    
-                    # 检查是否到达最大页数
-                    if page_index >= max_pages:
-                        logger.info(f"分类[{category_name}] 已到达最大页数限制 ({max_pages} 页)，停止翻页")
-                        break
-                    
-                    page_index += 1
-                    
-                    # 添加延时
-                    if not disable_speed_limit:
-                        delay = random.uniform(*delay_range)
-                        time.sleep(delay)
-                        
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"请求失败: {e}", exc_info=True)
-                    self.monitor.record_request(self.search_url, success=False, error_type=str(type(e).__name__))
-                    break
-                except Exception as e:
-                    logger.error(f"请求未知错误: {e}", exc_info=True)
-                    self.monitor.record_request(self.search_url, success=False, error_type="unknown")
-                    break
-            
-            # 显示当前分类的统计信息
-            logger.info(f"分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
-            if callback:
-                callback(f"分类[{category_name}] 爬取完成，共获取 {len(category_policies)} 条政策")
-        
-        # 应用去重机制
-        logger.info("应用数据去重...")
-        if callback:
-            callback("应用数据去重...")
-        
-        unique_policies = self._deduplicate_policies(all_policies)
-        
-        # 最终统计
-        total_saved = len(unique_policies)
-        
-        logger.info(f"爬取完成统计:")
-        logger.info(f"  总爬取数量: {total_crawled} 条")
-        if keywords:
-            logger.info(f"  关键词过滤: {keywords}")
-        if enable_time_filter:
-            logger.info(f"  时间过滤: {start_date} 至 {end_date}")
-            logger.info(f"  过滤后数量: {total_filtered} 条")
-        logger.info(f"  去重后数量: {total_saved} 条")
-        
-        if callback:
-            callback(f"爬取完成统计:")
-            callback(f"  总爬取数量: {total_crawled} 条")
-            if keywords:
-                callback(f"  关键词过滤: {keywords}")
-            if enable_time_filter:
-                callback(f"  时间过滤: {start_date} 至 {end_date}")
-                callback(f"  过滤后数量: {total_filtered} 条") 
-            callback(f"  去重后数量: {total_saved} 条")
-        
-        return unique_policies
-    
+
     def _parse_policy_list_record_search(self, soup, callback=None, stop_callback=None, category_name=None):
         """解析RecordSearch接口返回的政策列表 - 基于最新HTML结构分析"""
         policies = []
@@ -2675,7 +2434,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
 
             # 如果所有方法都失败了，输出详细的调试信息
             if not real_title or real_title.startswith('政策ID:'):
-                logger.warning(f"⚠️ 所有标题提取方法都失败了！")
+                logger.warning("⚠️ 所有标题提取方法都失败了！")
                 logger.warning(f"详情页面URL: {url}")
                 logger.warning(f"HTML文档标题标签数量: {len(detail_soup.find_all('title'))}")
                 logger.warning(f"HTML文档input标签数量: {len(detail_soup.find_all('input'))}")
@@ -2821,7 +2580,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     if content:
                         logger.debug(f"成功获取正文，长度: {len(content)} 字符")
                     else:
-                        logger.warning(f"未获取到正文内容")
+                        logger.warning("未获取到正文内容")
                 except Exception as e:
                     logger.error(f"获取政策正文失败: {e}", exc_info=True)
                     content = ""
@@ -3350,7 +3109,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 enable_time_filter = True
                 logger.info(f"启用时间过滤: {start_date} 至 {end_date}")
             except ValueError:
-                logger.warning(f"时间格式错误，禁用时间过滤")
+                logger.warning("时间格式错误，禁用时间过滤")
                 enable_time_filter = False
         else:
             logger.info("未设置时间范围，禁用时间过滤")
@@ -3368,7 +3127,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         elif speed_mode == "慢速模式":
             delay_range = (2, 4)
         else:  # 正常速度
-            delay_range = (1, 2)
+            delay_range = (1, 2)  # noqa: F841 - used later in random.uniform(*delay_range)
         
         # 获取所有分类（使用扁平化列表）
         categories = self._get_flat_categories()
@@ -3461,7 +3220,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 最终统计
         total_saved = len(unique_policies)
         
-        logger.info(f"爬取完成统计:")
+        logger.info("爬取完成统计:")
         logger.info(f"  总爬取数量: {total_crawled} 条")
         if keywords:
             logger.info(f"  关键词过滤: {keywords}")
@@ -3471,7 +3230,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         logger.info(f"  去重后数量: {total_saved} 条")
         
         if callback:
-            callback(f"爬取完成统计:")
+            callback("爬取完成统计:")
             callback(f"  总爬取数量: {total_crawled} 条")
             if keywords:
                 callback(f"  关键词过滤: {keywords}")
@@ -3499,7 +3258,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 enable_time_filter = True
                 logger.info(f"启用时间过滤: {start_date} 至 {end_date}")
             except ValueError:
-                logger.warning(f"时间格式错误，禁用时间过滤")
+                logger.warning("时间格式错误，禁用时间过滤")
                 enable_time_filter = False
         else:
             logger.info("未设置时间范围，禁用时间过滤")
@@ -3656,7 +3415,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     logger.warning(f"请求超时: {e}", exc_info=True)
                     self.monitor.record_request(self.search_url, success=False, error_type="timeout")
                     if callback:
-                        callback(f"请求超时，等待3秒后重试...")
+                        callback("请求超时，等待3秒后重试...")
                     time.sleep(3)
                     continue
                     
@@ -3664,7 +3423,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     logger.error(f"连接错误: {e}", exc_info=True)
                     self.monitor.record_request(self.search_url, success=False, error_type="connection_error")
                     if callback:
-                        callback(f"连接错误，等待3秒后重试...")
+                        callback("连接错误，等待3秒后重试...")
                     time.sleep(3)
                     continue
                     
@@ -3675,9 +3434,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     
                     # 如果是反爬虫相关错误，增加延时
                     if error_code in [403, 429]:
-                        logger.warning(f"检测到反爬虫限制，等待5秒后重试...")
+                        logger.warning("检测到反爬虫限制，等待5秒后重试...")
                         if callback:
-                            callback(f"检测到访问限制，等待重试...")
+                            callback("检测到访问限制，等待重试...")
                         time.sleep(5)
                         continue
                     else:
@@ -3693,9 +3452,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     break
                     
                     # 其他错误，记录并继续
-                    logger.warning(f"未知错误，跳过当前页面")
+                    logger.warning("未知错误，跳过当前页面")
                     if callback:
-                        callback(f"页面处理出错，跳过继续...")
+                        callback("页面处理出错，跳过继续...")
                     break
             
             logger.info(f"策略1完成，共获取 {len(all_policies)} 条政策")
@@ -3720,7 +3479,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 最终统计
         total_saved = len(unique_policies)
         
-        logger.info(f"快速爬取完成统计:")
+        logger.info("快速爬取完成统计:")
         logger.info(f"  总爬取数量: {total_crawled} 条")
         logger.info(f"  过滤后数量: {total_filtered} 条")
         logger.info(f"  最终保存数量: {total_saved} 条")
@@ -3821,8 +3580,7 @@ class GuangdongMultiThreadSpider(MultiThreadBaseCrawler):
     
     def _execute_task(self, task_data: Dict, session, lock, callback: Optional[Callable] = None) -> List[Dict]:
         """执行具体任务 - 使用成功的搜索策略"""
-        
-        task_id = task_data['task_id']
+
         category_name = task_data['category_name']
         description = task_data['description']
         
