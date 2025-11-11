@@ -124,7 +124,7 @@ class DataExporter:
         """导出政策数据到Excel文档"""
         # 检查pandas是否可用
         try:
-            import pandas as pd  # type: ignore
+            import pandas as pd  
         except ImportError:
             logger.error("❌ 缺少依赖库: pandas")
             logger.info("💡 解决方案: pip install pandas openpyxl")

@@ -1,19 +1,19 @@
 {
   "current_proxy": {
-    "ip": "123.96.147.59",
-    "port": "23146",
+    "ip": "116.208.194.143",
+    "port": "21005",
     "proxy_type": "api",
     "username": "",
     "password": "",
-    "created_at": "2025-11-05T20:59:19.872642",
-    "first_used_at": "2025-11-05T20:59:21.068270",
-    "last_used_at": "2025-11-05T20:59:42.024479",
-    "last_success_at": "2025-11-05T20:59:42.024479",
-    "use_count": 19,
-    "success_count": 19,
-    "failure_count": 0,
-    "consecutive_failures": 0,
-    "is_active": true
+    "created_at": "2025-11-11T15:38:50.531892",
+    "first_used_at": "2025-11-11T15:38:52.187621",
+    "last_used_at": "2025-11-11T15:39:59.405198",
+    "last_success_at": "2025-11-11T15:39:50.640525",
+    "use_count": 36,
+    "success_count": 33,
+    "failure_count": 3,
+    "consecutive_failures": 3,
+    "is_active": false
   },
-  "last_update": "2025-11-05T20:59:42.024499"
+  "last_update": "2025-11-11T15:39:59.405450"
 }

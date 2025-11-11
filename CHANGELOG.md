@@ -1,5 +1,28 @@
 # 更新日志 (CHANGELOG)
 
+# 更新日志 (CHANGELOG)
+
+## [3.1.0] - 2025-11-11
+
+### ✨ 新增
+- **广东省爬虫双请求年份筛选**：对 `dfxfg`、`dfzfgz`、`sfjs`、`fljs` 分类完整复刻前端 `ClassSearch + RecordSearch` 链路，精准定位目标年份。
+- **跨年数据自动过滤**：列表 `related-info` 与详情 `pub_date` 双重校验，避免混入上/下年度记录。
+- **Excel 全量导出脚本**：提供 `scripts/export_guangdong_policies_excel.py`，汇总「分类名称 + 年份 + 标题 + URL」，覆盖所有有效年份（含 20 世纪数据）。
+
+### 🔧 改进
+- **移除 `china` 接口映射**，统一从实际分类入口发起请求，避免落回主页。
+- **年份统计日志优化**，新增“总年份数量”提示，避免仅显示最近 5 年造成的误解。
+- **项目目录清理**：删除 `build/`、`dist/`、`__pycache__/`、`guangdong_counter.log` 等临时文件。
+- **版本号更新**：同步更新 `__version__`、`APP_CONFIG['app_version']` 及 README/文档版本信息。
+
+### 📝 文档
+- 更新 `README.md`、`docs/pkulaw_year_filter_reverse.md`、`版本管理说明.md` 记录新的爬虫策略与导出流程。
+
+### 📋 已知问题
+- **爬虫状态监控对话框**：在爬虫运行时仍可能导致崩溃，建议在待机状态下使用或等待后续版本修复。
+
+---
+
 ## [3.0.2] - 2025-11-02
 
 ### ⚠️ 重要说明

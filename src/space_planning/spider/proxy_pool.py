@@ -14,9 +14,18 @@ import threading
 import re
 from typing import Optional, Dict, List
 from datetime import datetime
-from kdl.auth import Auth
-from kdl.client import Client
-import random # Added for random.random()
+
+# Conditional import for kdl
+try:
+    from kdl.auth import Auth
+    from kdl.client import Client
+    KDL_AVAILABLE = True
+except ImportError:
+    Auth = None
+    Client = None
+    KDL_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("KDL 模块未安装，代理池功能禁用")
 
 logger = logging.getLogger(__name__)
 
@@ -887,6 +896,9 @@ _global_max_fail_count = 3  # 最大失败次数后切换代理
 
 def initialize_proxy_pool(config_file: str):
     """初始化全局代理池"""
+    if not KDL_AVAILABLE:
+        logger.info("跳过代理池初始化（KDL 不可用）")
+        return None
     _proxy_manager.initialize(config_file)
 
 
