@@ -65,7 +65,6 @@ src_path = project_root / 'src'
 datas = [
     (str(src_path / 'space_planning' / 'gui' / 'proxy_config.json.template'), 'space_planning/gui'),
     (str(src_path / 'crawler_config.json'), 'space_planning'),
-    (str(project_root / 'docs' / 'icon.ico'), 'docs'),
 ]
 
 # 隐藏导入
@@ -208,7 +207,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(project_root / 'docs' / 'icon.ico'),
+    icon=None,
 )
 '''
     
@@ -286,7 +285,7 @@ def build_exe():
 def main():
     """主函数"""
     print("=== 空间规划政策爬虫系统 - EXE打包工具（修复版）===")
-    print("版本: v3.0.0")
+    print("版本: v3.1.0")
     print("修复内容: 解决email模块和distutils冲突问题")
     print()
     
