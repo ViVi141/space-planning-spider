@@ -18,7 +18,7 @@ from .exceptions import ConfigError, ConfigFileNotFoundError, ConfigParseError
 # 应用配置
 APP_CONFIG = {
     'app_name': '空间规划政策爬虫系统',
-    'app_version': '3.1.1',
+    'app_version': '3.1.2',
     'install_mode': True,  # 是否使用安装模式
     'data_dir_name': '空间规划政策爬虫系统',  # 数据目录名称
 }

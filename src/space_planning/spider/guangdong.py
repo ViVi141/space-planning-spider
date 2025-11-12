@@ -13,8 +13,9 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 import requests
@@ -130,16 +131,60 @@ class GuangdongSpider(EnhancedBaseCrawler):
         self._session_started_at = time.time()
         self._requests_since_rotation = 0
         self._request_timestamps = deque()
+        
+        # 针对广东站点调慢节奏
+        self.min_delay = max(self.min_delay, 3.0)
+        self.max_delay = max(self.max_delay, 7.0)
+        if self.requests_per_minute > 20:
+            self.requests_per_minute = 20
+        self.rate_limit_enabled = True
     
     def _reset_session_counters(self) -> None:
         """重置会话计数"""
         self._session_started_at = time.time()
         self._requests_since_rotation = 0
         self._policy_success_counter = 0
+
+    def _capture_blocked_snapshot(self, url: str, html: str) -> Optional[str]:
+        """保存被限制页面的快照，便于后续分析"""
+        try:
+            snapshot_dir = Path(__file__).resolve().parent / "blocked_snapshots"
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            parsed = urlparse(url)
+            slug_parts = [parsed.netloc or "", parsed.path.replace("/", "_")]
+            slug = "_".join(filter(None, slug_parts)).strip("_")
+            if not slug:
+                slug = "detail"
+            slug = re.sub(r"[^0-9A-Za-z_\-]+", "_", slug)[:80]
+
+            file_path = snapshot_dir / f"{timestamp}_{slug}.html"
+            file_path.write_text(html, encoding="utf-8")
+
+            meta_path = file_path.with_suffix(".meta.txt")
+            meta_path.write_text(
+                f"URL: {url}\nCapturedAt: {datetime.now().isoformat()}\n",
+                encoding="utf-8"
+            )
+            return str(file_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("保存限制页面快照失败: %s", exc, exc_info=True)
+            return None
     
     def _apply_dynamic_headers(self) -> None:
         """根据配置动态更新会话请求头"""
         base_headers = self.headers.copy()
+        base_headers.setdefault('Accept-Language', 'zh-CN,zh;q=0.9,en;q=0.8')
+        base_headers.setdefault('Accept-Encoding', 'gzip, deflate, br, zstd')
+        base_headers.setdefault('Cache-Control', 'max-age=0')
+        base_headers.setdefault('Upgrade-Insecure-Requests', '1')
+        base_headers.setdefault('Sec-Fetch-Site', 'same-origin')
+        base_headers.setdefault('Sec-Fetch-Mode', 'navigate')
+        base_headers.setdefault('Sec-Fetch-Dest', 'document')
+        base_headers.setdefault('sec-ch-ua', '"Not/A)Brand";v="8", "Chromium";v="138", "Microsoft Edge";v="138"')
+        base_headers.setdefault('sec-ch-ua-mobile', '?0')
+        base_headers.setdefault('sec-ch-ua-platform', '"Windows"')
         
         random_headers = None
         if self.randomize_user_agent or self.add_fingerprint_header:
@@ -162,6 +207,40 @@ class GuangdongSpider(EnhancedBaseCrawler):
         self.headers = base_headers.copy()
         self.session.headers.clear()
         self.session.headers.update(base_headers)
+    
+    def _preheat_session(
+        self,
+        session: Optional[requests.Session] = None,
+        api_config: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """访问入口页，获取必要的 Cookie 和动态参数"""
+        target_session = session or self.session
+        if target_session is None:
+            return False
+    
+        api_config = api_config or self.current_api_config or {}
+        adv_url = api_config.get('init_page', f"{self.base_url}/dfxfg/adv")
+        referer = api_config.get('referer', adv_url)
+    
+        headers = target_session.headers.copy()
+        headers.setdefault('Referer', referer)
+        headers.setdefault('Cache-Control', 'no-cache')
+    
+        try:
+            resp = target_session.get(
+                adv_url,
+                headers=headers,
+                timeout=20,
+                allow_redirects=True,
+            )
+            if resp.status_code == 200:
+                logger.debug("预热入口页成功: %s", adv_url)
+                self._access_limit_strikes = 0
+                return True
+            logger.warning("预热入口页失败 [%s]: HTTP %s", adv_url, resp.status_code)
+        except requests.RequestException as exc:
+            logger.warning("预热入口页异常 [%s]: %s", adv_url, exc, exc_info=True)
+        return False
     
     def _prepare_request_headers(self, headers: Optional[Dict] = None) -> Dict:
         """合并基础请求头与动态头信息"""
@@ -280,6 +359,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         
         self._apply_rate_limit()
         self._maybe_rotate_session()
+        self._sleep_between_requests(self.speed_mode)
         
         prepared_headers = self._prepare_request_headers(headers)
         start_time = time.time()
@@ -294,8 +374,21 @@ class GuangdongSpider(EnhancedBaseCrawler):
             elapsed = time.time() - start_time
             request_info['response_time'] = elapsed
             request_info['status_code'] = response.status_code
+            request_info['access_blocked'] = False
             self._requests_since_rotation += 1
             
+            response_text = ""
+            content_type = response.headers.get("Content-Type", "") if response else ""
+            if "text" in content_type or "json" in content_type:
+                try:
+                    response_text = response.text
+                except Exception:  # noqa: BLE001
+                    response_text = ""
+
+            if response_text:
+                if self._handle_access_limit(response_text):
+                    request_info['access_blocked'] = True
+
             if self.monitor:
                 success = 200 <= response.status_code < 400
                 error_type = None if success else f"HTTP {response.status_code}"
@@ -365,6 +458,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 分类年份统计缓存
         self.category_year_counts: Dict[str, List[Tuple[int, int]]] = {}
         self._policy_success_counter = 0
+        self._access_limit_strikes = 0
         
         # 载入运行时配置
         self._load_runtime_settings()
@@ -458,43 +552,15 @@ class GuangdongSpider(EnhancedBaseCrawler):
         else:
             logger.info("GuangdongSpider: 代理已禁用，使用直接连接")
         
-        # 访问首页获取必要的Cookie
-        try:
-            # 验证代理是否已设置
-            if self.enable_proxy:
-                current_proxies = getattr(self.session, 'proxies', {})
-                if current_proxies:
-                    proxy_info = str(current_proxies)
-                    logger.info(f"[代理验证] 会话代理设置: {proxy_info}")
-                else:
-                    logger.warning("[代理验证] 警告: 启用代理但会话中未检测到代理设置")
-            
-            resp, _ = self._session_get(self.base_url, timeout=10)
-            if resp and resp.status_code == 200:
-                logger.info("成功访问首页，获取必要Cookie")
-                
-                # 验证请求是否使用了代理（通过检查响应头或日志）
-                if self.enable_proxy and hasattr(self.session, 'proxies') and self.session.proxies:
-                    logger.info(f"[代理验证] 请求已使用代理: {self.session.proxies}")
+        if self.enable_proxy:
+            current_proxies = getattr(self.session, 'proxies', {})
+            if not current_proxies:
+                logger.warning("[代理验证] 警告: 启用代理但会话中未检测到代理设置")
             else:
-                status = resp.status_code if resp else "No response"
-                logger.warning(f"访问首页失败，状态码: {status}")
-        except requests.exceptions.Timeout as e:
-            if hasattr(self, 'monitor') and self.monitor:
-                self.monitor.record_request(self.base_url, success=False, error_type="timeout")
-            logger.warning(f"访问首页超时: {e}", exc_info=True)
-        except requests.exceptions.ConnectionError as e:
-            if hasattr(self, 'monitor') and self.monitor:
-                self.monitor.record_request(self.base_url, success=False, error_type="connection_error")
-            logger.error(f"访问首页连接错误: {e}", exc_info=True)
-        except requests.exceptions.RequestException as e:
-            if hasattr(self, 'monitor') and self.monitor:
-                self.monitor.record_request(self.base_url, success=False, error_type=str(e))
-            logger.error(f"访问首页请求异常: {e}", exc_info=True)
-        except Exception as e:
-            if hasattr(self, 'monitor') and self.monitor:
-                self.monitor.record_request(self.base_url, success=False, error_type="unknown")
-            logger.error(f"访问首页未知错误: {e}", exc_info=True)
+                logger.info(f"[代理验证] 会话代理设置: {current_proxies}")
+
+        if not self._preheat_session():
+            logger.warning("初始化会话时预热入口页失败，后续请求可能需要额外重试")
     
     def _rotate_session(self):
         """轮换会话，避免访问限制 (借鉴 old)"""
@@ -524,37 +590,52 @@ class GuangdongSpider(EnhancedBaseCrawler):
             except Exception as e:
                 logger.warning(f"新会话代理设置失败: {e}")
         
-        # 访问首页获取新的Cookie
-        try:
-            resp = new_session.get(self.base_url, timeout=10)
-            if resp.status_code == 200:
-                logger.info("成功轮换会话")
-                self.session = new_session
-                self._reset_session_counters()
-                self._apply_dynamic_headers()
-                # 更新 monitor 如果存在
-                if hasattr(self, 'monitor'):
-                    self.monitor.record_request(self.base_url, success=True)
-                return True
-            else:
-                logger.warning(f"轮换会话失败，状态码: {resp.status_code}")
-                return False
-        except Exception as e:
-            logger.error(f"轮换会话异常: {e}")
+        # 访问入口页获取新的Cookie
+        if not self._preheat_session(new_session, self.current_api_config):
+            logger.warning("轮换会话时预热入口页失败")
             return False
+
+        logger.info("成功轮换会话")
+        self.session = new_session
+        self._reset_session_counters()
+        self._apply_dynamic_headers()
+        if hasattr(self, 'monitor'):
+            self.monitor.record_request(self.base_url, success=True)
+        return True
     
-    def _handle_access_limit(self, response_text):
-        """处理访问限制 (借鉴 old)"""
-        if "您已超过全文最大访问数" in response_text or "访问限制" in response_text or "最大访问数" in response_text:
-            logger.warning("检测到访问限制，尝试轮换会话...")
-            if self._rotate_session():
-                logger.info("会话轮换成功，继续爬取")
-                return True
-            else:
-                logger.warning("会话轮换失败，等待后重试...")
-                import time
-                time.sleep(30)  # 等待 30 秒
-                return self._rotate_session()
+    def _handle_access_limit(self, response_text: str) -> bool:
+        """检测并处理访问限制"""
+        limit_tokens = [
+            "您已超过全文最大访问数",
+            "访问限制",
+            "最大访问数",
+            "抱歉，您已超过全文最大访问数",
+        ]
+        if not any(token in response_text for token in limit_tokens):
+            self._access_limit_strikes = 0
+            return False
+
+        self._access_limit_strikes += 1
+        backoff_seconds = min(180, 30 * self._access_limit_strikes)
+
+        logger.warning(
+            "检测到访问限制，第%s次尝试，%s秒后重建会话并刷新代理",
+            self._access_limit_strikes,
+            backoff_seconds,
+        )
+
+        try:
+            self.force_refresh_proxy()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("刷新代理时出现异常（忽略继续）: %s", exc)
+
+        time.sleep(backoff_seconds)
+        if self._rotate_session():
+            self._preheat_session(api_config=self.current_api_config)
+            logger.info("会话轮换成功，准备继续请求")
+            return True
+
+        logger.warning("会话轮换失败，仍将继续使用原会话")
         return False
     
     def _check_access_limit(self, response_text: str) -> bool:
@@ -612,6 +693,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 
                 if search_resp and search_resp.status_code == 200:
                     # 检查响应内容是否包含访问限制
+                    if search_info.get('access_blocked'):
+                        logger.info(f"检测到访问限制，已完成会话轮换，准备重试第{page_index}页")
+                        retry_count += 1
+                        time.sleep(5)
+                        continue
+
                     if self._handle_access_limit(search_resp.text):
                         logger.info(f"检测到访问限制，已轮换会话，重试第{page_index}页")
                         retry_count += 1
@@ -1991,6 +2078,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     return {}
     
                 soup = BeautifulSoup(resp.content, 'html.parser')
+                access_blocked = bool(request_info.get('access_blocked'))
+                snapshot_path = ""
     
                 # 标题提取
                 real_title = ''
@@ -2095,16 +2184,18 @@ class GuangdongSpider(EnhancedBaseCrawler):
                                 real_title = ''
     
                 # 判定是否命中全文访问限制提示
-                access_blocked = False
                 block_tokens = [
                     '抱歉，您已超过全文最大访问数',
                     '为了保证服务质量',
                     '错误提示',
                     '请登录后再访问全文'
                 ]
-                if any(token in resp.text for token in block_tokens):
+                if not access_blocked and any(token in resp.text for token in block_tokens):
                     access_blocked = True
                     logger.warning("检测到全文访问限制提示: %s", url)
+                    snapshot_path = self._capture_blocked_snapshot(url, resp.text)
+                    if snapshot_path:
+                        logger.info("限制页面快照已保存: %s", snapshot_path)
                     # 避免把限制页的内容当成正文
                     content_text = ''
                     if expected_title:
@@ -2124,8 +2215,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 if access_blocked:
                     self.monitor.record_request(url, success=False, error_type="access_limited")
                     if attempt < max_detail_attempts:
-                        self.force_refresh_proxy()
-                        self._maybe_rotate_session(force=True)
+                        if not request_info.get('access_blocked'):
+                            self.force_refresh_proxy()
+                            self._maybe_rotate_session(force=True)
                         self._sleep_between_requests(self.speed_mode, False)
                         continue
                     return detail_data

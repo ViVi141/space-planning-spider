@@ -11,7 +11,7 @@ import json
 import time
 import logging
 import threading
-import re
+import random
 from typing import Optional, Dict, List
 from datetime import datetime
 
@@ -747,6 +747,10 @@ class ProxyManager:
     def __init__(self):
         if not hasattr(self, 'initialized'):
             self.proxy_pool = None
+            self.client = None
+            self.use_tunnel = False
+            self.username = ''
+            self.password = ''
             self.initialized = True
     
     def is_initialized(self) -> bool:
@@ -804,17 +808,49 @@ class ProxyManager:
                         except Exception:
                             pass  # password可能不是加密的
                     
+                config.setdefault('use_pool_cache', False)
+
                 if config.get('enabled', False):
-                    self.proxy_pool = ProxyPool(
-                        secret_id=config.get('secret_id', ''),
-                        secret_key=config.get('secret_key', ''),
-                        username=config.get('username', ''),
-                        password=config.get('password', ''),
-                        max_proxies=config.get('max_proxies', 5),
-                        check_interval=config.get('check_interval', 300)
-                    )
-                    self.proxy_pool.start()
-                    logger.info("代理池初始化成功")
+                    secret_id = config.get('secret_id', '')
+                    secret_key = config.get('secret_key', '')
+                    username = config.get('username', '')
+                    password = config.get('password', '')
+                    use_pool_cache = config.get('use_pool_cache', True)
+
+                    if not secret_id or not secret_key:
+                        logger.error("代理配置缺少SecretId或SecretKey，无法初始化快代理客户端")
+                        return False
+
+                    auth = Auth(secret_id, secret_key)
+                    self.client = Client(auth)
+                    self.use_tunnel = bool(config.get('use_tunnel', False))
+                    self.username = username
+                    self.password = password
+
+                    if use_pool_cache:
+                        if self.proxy_pool:
+                            try:
+                                self.proxy_pool.stop()
+                            except Exception:
+                                logger.debug("停止旧代理池实例失败，将继续重新初始化", exc_info=True)
+                        self.proxy_pool = ProxyPool(
+                            secret_id=secret_id,
+                            secret_key=secret_key,
+                            username=username,
+                            password=password,
+                            max_proxies=config.get('max_proxies', 5),
+                            check_interval=config.get('check_interval', 300)
+                        )
+                        self.proxy_pool.start()
+                        logger.info("代理池初始化成功")
+                    else:
+                        if self.proxy_pool:
+                            try:
+                                self.proxy_pool.stop()
+                            except Exception:
+                                logger.debug("停止代理池实例失败，但继续采用按需获取模式", exc_info=True)
+                        self.proxy_pool = None
+                        logger.info("已禁用代理池缓存模式，将按需从快代理获取IP")
                     return True
                 else:
                     logger.info("代理功能已禁用")
@@ -894,6 +930,56 @@ _global_proxy_fail_count = 0
 _global_max_fail_count = 3  # 最大失败次数后切换代理
 
 
+def _fetch_direct_proxy_from_kdl() -> Optional[Dict[str, str]]:
+    """直接调用快代理获取最新代理（跳过本地代理池缓存）"""
+    manager = _proxy_manager
+
+    client = getattr(manager, 'client', None)
+    pool = getattr(manager, 'proxy_pool', None)
+
+    if not client and pool:
+        client = getattr(pool, 'client', None)
+
+    if not client:
+        logger.warning("直接获取代理失败：快代理客户端未配置")
+        return None
+
+    use_tunnel = getattr(manager, 'use_tunnel', False)
+    username = getattr(manager, 'username', '')
+    password = getattr(manager, 'password', '')
+
+    try:
+        if use_tunnel:
+            raw_data = client.get_tps(
+                num=1,
+                username=username,
+                password=password
+            )
+        else:
+            raw_data = client.get_dps(num=1)
+
+        if not raw_data:
+            logger.warning("快代理未返回可用IP")
+            return None
+
+        proxy_entry = raw_data
+        if isinstance(raw_data, (list, tuple)):
+            proxy_entry = raw_data[0] if raw_data else None
+
+        if isinstance(proxy_entry, (list, tuple)):
+            proxy_entry = proxy_entry[0] if proxy_entry else None
+
+        if not proxy_entry:
+            logger.warning("快代理返回数据格式异常: %s", raw_data)
+            return None
+
+        proxy_info = ProxyInfo(proxy_entry)
+        return proxy_info.proxy_dict
+    except Exception as exc:  # noqa: BLE001
+        logger.error("直接从快代理获取代理失败: %s", exc, exc_info=True)
+        return None
+
+
 def initialize_proxy_pool(config_file: str):
     """初始化全局代理池"""
     if not KDL_AVAILABLE:
@@ -928,82 +1014,36 @@ def is_global_proxy_enabled() -> bool:
 
 
 def get_shared_proxy() -> Optional[Dict[str, str]]:
-    """获取共享代理 - 所有爬虫使用同一个代理直到失效（自动包含认证信息）"""
+    """获取共享代理（直接向快代理请求最新IP，不使用本地代理池缓存）"""
     global _global_current_proxy, _global_proxy_fail_count
-    
-    with _global_proxy_lock:
-        if not _global_proxy_enabled:
-            return None
-        
-        # 如果当前代理失败次数过多，切换新代理
-        if _global_proxy_fail_count >= _global_max_fail_count:
-            _global_current_proxy = None
+
+    if not _global_proxy_enabled:
+        return None
+
+    proxy_dict = _fetch_direct_proxy_from_kdl()
+    if proxy_dict:
+        with _global_proxy_lock:
+            _global_current_proxy = proxy_dict.copy()
             _global_proxy_fail_count = 0
-        
-        # 如果没有当前代理，获取新代理
-        if _global_current_proxy is None:
-            try:
-                # 优先使用get_proxy_dict()，它已经包含了认证信息（如果配置了username和password）
-                proxy_dict = _proxy_manager.get_proxy_dict()
-                if proxy_dict and isinstance(proxy_dict, dict):
-                    _global_current_proxy = proxy_dict.copy()
-                    logger.debug(f"从get_proxy_dict获取代理（已包含认证）: {_global_current_proxy}")
-                else:
-                    # 降级：尝试get_proxy()获取ProxyInfo对象
-                    proxy_info = _proxy_manager.get_proxy()
-                    if proxy_info:
-                        if hasattr(proxy_info, 'proxy_dict'):
-                            # 如果ProxyInfo对象有proxy_dict属性（已包含认证），直接使用
-                            _global_current_proxy = proxy_info.proxy_dict.copy() if isinstance(proxy_info.proxy_dict, dict) else None
-                            logger.debug(f"从ProxyInfo.proxy_dict获取代理: {_global_current_proxy}")
-                        elif hasattr(proxy_info, 'ip') and hasattr(proxy_info, 'port'):
-                            # 手动构建代理字典（如果需要认证，从配置读取）
-                            username = getattr(proxy_info, 'username', '')
-                            password = getattr(proxy_info, 'password', '')
-                            
-                            if username and password:
-                                # 带认证的代理格式
-                                _global_current_proxy = {
-                                    'http': f'http://{username}:{password}@{proxy_info.ip}:{proxy_info.port}',
-                                    'https': f'http://{username}:{password}@{proxy_info.ip}:{proxy_info.port}'
-                                }
-                                logger.debug(f"使用带认证的共享代理: {username}@{proxy_info.ip}:{proxy_info.port}")
-                            else:
-                                # 无认证的代理格式
-                                _global_current_proxy = {
-                                    'http': f'http://{proxy_info.ip}:{proxy_info.port}',
-                                    'https': f'http://{proxy_info.ip}:{proxy_info.port}'
-                                }
-                                logger.debug(f"使用无认证的共享代理: {proxy_info.ip}:{proxy_info.port}")
-                        elif isinstance(proxy_info, dict):
-                            # 已经是字典格式
-                            if 'http' in proxy_info or 'https' in proxy_info:
-                                # 已经是标准的requests代理格式，直接使用
-                                _global_current_proxy = proxy_info.copy()
-                            elif 'ip' in proxy_info and 'port' in proxy_info:
-                                username = proxy_info.get('username', '')
-                                password = proxy_info.get('password', '')
-                                if username and password:
-                                    _global_current_proxy = {
-                                        'http': f'http://{username}:{password}@{proxy_info["ip"]}:{proxy_info["port"]}',
-                                        'https': f'http://{username}:{password}@{proxy_info["ip"]}:{proxy_info["port"]}'
-                                    }
-                                else:
-                                    _global_current_proxy = {
-                                        'http': f'http://{proxy_info["ip"]}:{proxy_info["port"]}',
-                                        'https': f'http://{proxy_info["ip"]}:{proxy_info["port"]}'
-                                    }
-                            else:
-                                _global_current_proxy = None
-                        else:
-                            _global_current_proxy = None
-                    else:
-                        _global_current_proxy = None
-            except Exception as e:
-                logger.error(f"获取共享代理失败: {e}", exc_info=True)
-                _global_current_proxy = None
-        
-        return _global_current_proxy
+        return proxy_dict
+
+    # 如果直接获取失败，保留原有退化逻辑，尽量保证服务不断
+    with _global_proxy_lock:
+        if _global_current_proxy:
+            logger.warning("直接获取代理失败，继续使用上一次代理")
+            return _global_current_proxy
+
+    try:
+        fallback_proxy = _proxy_manager.get_proxy_dict()
+        if fallback_proxy:
+            with _global_proxy_lock:
+                _global_current_proxy = fallback_proxy.copy()
+            logger.warning("直接获取代理失败，回退至代理池缓存")
+            return fallback_proxy
+    except Exception as exc:  # noqa: BLE001
+        logger.error("回退获取代理失败: %s", exc, exc_info=True)
+
+    return None
 
 
 def report_shared_proxy_result(success: bool):

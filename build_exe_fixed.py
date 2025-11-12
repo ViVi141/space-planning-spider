@@ -285,7 +285,7 @@ def build_exe():
 def main():
     """主函数"""
     print("=== 空间规划政策爬虫系统 - EXE打包工具（修复版）===")
-    print("版本: v3.1.1")
+    print("版本: v3.1.2")
     print("修复内容: 解决email模块和distutils冲突问题")
     print()
     
