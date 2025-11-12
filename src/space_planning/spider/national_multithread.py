@@ -5,12 +5,9 @@
 基于MultiThreadBaseCrawler实现多线程爬取
 """
 
-import requests
 from datetime import datetime, timedelta
-import time
-import random
 from typing import List, Dict, Optional, Callable
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import logging
 import threading
 
@@ -91,7 +88,7 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
             # 取消时间限制时，设置一个很大的时间范围，确保爬取所有数据
             start_date = datetime(1990, 1, 1)  # 设置很早的开始时间
             end_date = datetime.now()
-            logger.info(f"取消时间限制，爬取所有可用数据")
+            logger.info("取消时间限制，爬取所有可用数据")
         
         # 按月分割任务（保持多线程效率）
         current_date = start_date
@@ -128,7 +125,6 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
     
     def _execute_task(self, task_data: Dict, session, lock, callback: Optional[Callable] = None) -> List[Dict]:
         """执行具体任务 - 完全按照单线程爬虫逻辑"""
-        task_id = task_data['task_id']
         start_date = task_data['start_date']
         end_date = task_data['end_date']
         description = task_data['description']
@@ -147,17 +143,10 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
         max_pages = 50  # 每个任务最多爬取50页
         max_consecutive_out_of_range = common_config['max_consecutive_out_of_range']
         
-        # 设置速度模式
+        # 基于速度模式应用统一配置
         speed_mode = getattr(self, 'speed_mode', '正常速度')
-        if speed_mode == "快速模式":
-            self.anti_crawler.min_delay = 0.1
-            self.anti_crawler.max_delay = 0.3
-        elif speed_mode == "慢速模式":
-            self.anti_crawler.min_delay = 2.0
-            self.anti_crawler.max_delay = 5.0
-        else:  # 正常速度
-            self.anti_crawler.min_delay = 0.2
-            self.anti_crawler.max_delay = 0.8
+        disable_speed_limit = getattr(self, 'disable_speed_limit', False)
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         
         # 完全按照单线程爬虫的时间处理逻辑
         dt_start = datetime.strptime(start_date, '%Y-%m-%d')
@@ -200,11 +189,10 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                 
                 # 使用线程专用会话发送请求
                 with lock:
-                    # 应用防反爬虫延迟
-                    time.sleep(random.uniform(self.anti_crawler.min_delay, self.anti_crawler.max_delay))
-                    
-                    response = session.get(
+                    self.anti_crawler.sleep_between_requests(disable_speed_limit)
+                    response = self.anti_crawler.make_request(
                         self.api_url,
+                        method='GET',
                         params=params,
                         headers=headers,
                         timeout=30
@@ -236,7 +224,6 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                     break
                 
                 # 解析HTML内容
-                from bs4 import BeautifulSoup, Tag
                 soup = BeautifulSoup(html_content, 'html.parser')
                 table = soup.find('table')
                 if not isinstance(table, Tag):
@@ -437,6 +424,8 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                       speed_mode="正常速度", disable_speed_limit=False, stop_callback=None):
         """兼容原有接口的多线程爬取方法"""
         self.speed_mode = speed_mode
+        self.disable_speed_limit = disable_speed_limit
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         
         # 保存用户指定的时间范围
         if start_date and end_date:
@@ -454,6 +443,8 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                                   speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, max_workers=None):
         """多线程爬取政策（兼容广东省爬虫接口）"""
         self.speed_mode = speed_mode
+        self.disable_speed_limit = disable_speed_limit
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         
         # 保存用户指定的时间范围
         if start_date and end_date:

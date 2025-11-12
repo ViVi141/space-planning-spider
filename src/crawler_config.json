@@ -13,7 +13,9 @@
     },
     "session_settings": {
       "rotation_interval": 180,
-      "max_requests_per_session": 30
+      "max_requests_per_session": 30,
+      "enable_rotation": true,
+      "enable_cookie_management": true
     },
     "headers_settings": {
       "randomize_user_agent": true,
@@ -24,12 +26,17 @@
       "simulate_human_behavior": true,
       "random_delay": true,
       "mouse_movement": true,
-      "scroll_simulation": true
+      "scroll_simulation": true,
+      "intensity": 10
     },
     "proxy_settings": {
       "enabled": false,
       "api_url": null,
       "rotation_strategy": "quality"
+    },
+    "rate_limit_settings": {
+      "enabled": true,
+      "max_requests_per_minute": 40
     }
   }
 }

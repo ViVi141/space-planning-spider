@@ -1,20 +1,19 @@
-import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import time
 import random
-import re
 import json
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin
 
-# 模块级别的常量，用于动态加载
-LEVEL_NAME = "自然资源部"
+import logging
 
 # 导入监控和防反爬虫模块
 from .monitor import CrawlerMonitor
 from .anti_crawler import AntiCrawlerManager
 from .spider_config import SpiderConfig
-import logging
+
+# 模块级别的常量，用于动态加载
+LEVEL_NAME = "自然资源部"
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +37,8 @@ class MNRSpider:
         # 初始化监控和防反爬虫管理器
         self.monitor = CrawlerMonitor()
         self.anti_crawler = AntiCrawlerManager()
-        
-        # 创建会话用于代理支持
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+        self.anti_crawler.configure_speed_mode(self.speed_mode, False)
+        self.anti_crawler.session.headers.update(self.headers)
         self._init_proxy()
         
         # 分类配置 - 更新为新的政府信息公开平台分类
@@ -61,7 +58,7 @@ class MNRSpider:
             '地质环境保护': {'code': '1330', 'name': '地质环境保护'},
             '海洋资源': {'code': '1331', 'name': '海洋资源'},
             '测绘地理信息': {'code': '1332', 'name': '测绘地理信息'},
-            '国土空间用途管制': {'code': '1333', 'name': '国土空间用途管制'},
+            '国土空间用途管制': {'code': '1333', 'name': '国土空间用途管制'},  # noqa: F601
             '地质灾害防治': {'code': '1334', 'name': '地质灾害防治'},
             '地质公园': {'code': '1335', 'name': '地质公园'},
             '地质遗迹保护': {'code': '1336', 'name': '地质遗迹保护'},
@@ -74,52 +71,17 @@ class MNRSpider:
     def _init_proxy(self):
         """初始化代理设置"""
         try:
-            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled
-            if is_global_proxy_enabled():
-                proxy_dict = get_shared_proxy()
-                if proxy_dict:
-                    self.session.proxies.update(proxy_dict)
-                    logger.info(f"MNRSpider: 已设置代理: {proxy_dict}")
-        except Exception as e:
-            logger.warning(f"MNRSpider: 初始化代理失败: {e}", exc_info=True)
+            self.anti_crawler.refresh_proxy()
+            logger.info("MNRSpider: 已刷新代理设置")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("MNRSpider: 初始化代理失败: %s", e, exc_info=True)
     
     def _update_proxy(self):
         """更新代理（每次请求前调用）"""
         try:
-            from .proxy_pool import get_shared_proxy, is_global_proxy_enabled, initialize_proxy_pool
-            import os
-            
-            # 确保代理启用
-            if not is_global_proxy_enabled():
-                return
-            
-            # 确保代理池已初始化
-            try:
-                from .proxy_pool import get_proxy_stats
-                stats = get_proxy_stats()
-                if not (stats and stats.get('running', False)):
-                    # 代理池未运行，初始化
-                    config_file = os.path.join(os.path.dirname(__file__), '..', 'gui', 'proxy_config.json')
-                    if os.path.exists(config_file):
-                        initialize_proxy_pool(config_file)
-            except:
-                pass
-            
-            # 获取最新代理
-            proxy_dict = get_shared_proxy()
-            if proxy_dict:
-                self.session.proxies.update(proxy_dict)
-                logger.debug(f"[代理验证] MNRSpider: 已更新代理: {proxy_dict}")
-                # 验证代理设置
-                session_proxies = getattr(self.session, 'proxies', {})
-                if session_proxies:
-                    logger.debug(f"[代理验证] MNRSpider: 会话代理设置验证成功: {session_proxies}")
-                else:
-                    logger.warning("[代理验证] MNRSpider: 警告: 代理字典更新后，会话中未检测到代理设置")
-            else:
-                logger.warning("[代理验证] MNRSpider: 警告: 无法获取代理（代理池可能未运行）")
-        except Exception as e:
-            logger.debug(f"[代理验证] MNRSpider: 更新代理失败: {e}，继续使用当前代理或无代理")
+            self.anti_crawler.refresh_proxy()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[代理验证] MNRSpider: 更新代理失败: %s，继续使用当前代理或无代理", e)
 
     def crawl_policies(self, keywords=None, callback=None, start_date=None, end_date=None, 
                       speed_mode="正常速度", disable_speed_limit=False, stop_callback=None, 
@@ -165,6 +127,8 @@ class MNRSpider:
             search_keywords.extend(keywords)
         
         search_word = ' '.join(search_keywords) if search_keywords else ''
+        self.disable_speed_limit = disable_speed_limit
+        self.anti_crawler.configure_speed_mode(self.speed_mode, disable_speed_limit)
         
         if callback:
             callback(f"搜索关键词: {search_word or '(无关键词，搜索全部政策)'}")
@@ -220,8 +184,14 @@ class MNRSpider:
                 try:
                     # 更新代理（每次请求前）
                     self._update_proxy()
-                    # 使用会话发送请求（支持代理）
-                    resp = self.session.get(self.search_api, params=params, headers=self.headers, timeout=15)
+                    # 使用统一请求管理器发送请求（支持代理与防爬配置）
+                    resp = self.anti_crawler.make_request(
+                        self.search_api,
+                        method='GET',
+                        params=params,
+                        headers=self.headers.copy(),
+                        timeout=15
+                    )
                     
                     if resp.status_code == 200:
                         self.monitor.record_request(self.search_api, success=True)
@@ -468,7 +438,6 @@ class MNRSpider:
                         continue
                     
                     # 解析表格数据 - 适配新结构
-                    index = cells[0].get_text(strip=True)
                     title_cell = cells[1]
                     doc_number = cells[2].get_text(strip=True)
                     pub_date = cells[3].get_text(strip=True)
@@ -565,7 +534,7 @@ class MNRSpider:
             # 更新代理
             self._update_proxy()
             # 使用会话发送请求（支持代理）
-            resp = self.session.get(url, headers=self.headers, timeout=15)
+            resp = self.anti_crawler.make_request(url, headers=self.headers.copy(), timeout=15)
             self.monitor.record_request(url, success=True)
             resp.encoding = resp.apparent_encoding
             soup = BeautifulSoup(resp.text, 'html.parser')
@@ -623,7 +592,13 @@ class MNRSpider:
             # 更新代理
             self._update_proxy()
             # 使用会话发送请求（支持代理）
-            resp = self.session.get(self.search_api, params=params, headers=self.headers, timeout=10)
+            resp = self.anti_crawler.make_request(
+                self.search_api,
+                method='GET',
+                params=params,
+                headers=self.headers.copy(),
+                timeout=10
+            )
             
             if callback:
                 callback(f"API测试状态码: {resp.status_code}")

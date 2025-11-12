@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
@@ -22,6 +23,8 @@ from .enhanced_base_crawler import EnhancedBaseCrawler
 from .multithread_base_crawler import MultiThreadBaseCrawler
 from .monitor import CrawlerMonitor
 from .spider_config import SpiderConfig
+from .config import crawler_config
+from .smart_request_manager import smart_request_manager
 from ..core import database as db
 
 # 机构名称常量
@@ -56,6 +59,271 @@ MAX_RECORDS_PER_BATCH = 10000  # 单次筛选的最大记录数（20条/页 * 50
 class GuangdongSpider(EnhancedBaseCrawler):
     """广东省政策爬虫 - 使用真实API接口"""
     
+    def _load_runtime_settings(self) -> None:
+        """从全局配置加载防反爬相关设置"""
+        cfg = crawler_config
+        
+        # 请求延迟配置
+        min_delay_cfg = cfg.get_config('request_delay.min')
+        max_delay_cfg = cfg.get_config('request_delay.max')
+        try:
+            self.min_delay = float(min_delay_cfg) if min_delay_cfg is not None else 1.0
+        except (TypeError, ValueError):
+            self.min_delay = 1.0
+        try:
+            self.max_delay = float(max_delay_cfg) if max_delay_cfg is not None else 3.0
+        except (TypeError, ValueError):
+            self.max_delay = 3.0
+        if self.min_delay < 0:
+            self.min_delay = 0.0
+        if self.max_delay < self.min_delay:
+            self.max_delay = self.min_delay
+        
+        # 会话配置
+        session_cfg = cfg.get_config('session_settings') or {}
+        self.enable_session_rotation = bool(session_cfg.get('enable_rotation', True))
+        self.enable_cookie_management = bool(session_cfg.get('enable_cookie_management', True))
+        try:
+            self.session_rotation_interval = int(session_cfg.get('rotation_interval', 300) or 0)
+        except (TypeError, ValueError):
+            self.session_rotation_interval = 300
+        try:
+            self.max_requests_per_session = int(session_cfg.get('max_requests_per_session', 50) or 0)
+        except (TypeError, ValueError):
+            self.max_requests_per_session = 50
+        
+        # 请求头配置
+        header_cfg = cfg.get_config('headers_settings') or {}
+        self.randomize_user_agent = bool(header_cfg.get('randomize_user_agent', True))
+        self.add_referer_header = bool(header_cfg.get('add_referer', True))
+        self.add_fingerprint_header = bool(header_cfg.get('add_fingerprint', False))
+        
+        # 行为模拟配置
+        behavior_cfg = cfg.get_config('behavior_settings') or {}
+        self.simulate_human_behavior = bool(behavior_cfg.get('simulate_human_behavior', True))
+        self.random_delay_enabled = bool(behavior_cfg.get('random_delay', True))
+        intensity = behavior_cfg.get('intensity', 5)
+        try:
+            intensity = int(intensity)
+        except (TypeError, ValueError):
+            intensity = 5
+        self.behavior_intensity = max(1, min(intensity, 10))
+        
+        # 频率限制配置
+        rate_cfg = cfg.get_config('rate_limit_settings') or {}
+        self.rate_limit_enabled = bool(rate_cfg.get('enabled', False))
+        rpm_cfg = rate_cfg.get('max_requests_per_minute', 60)
+        try:
+            rpm = int(rpm_cfg)
+        except (TypeError, ValueError):
+            rpm = 60
+        self.requests_per_minute = max(1, rpm)
+        
+        # 会话状态
+        self._session_started_at = time.time()
+        self._requests_since_rotation = 0
+        self._request_timestamps = deque()
+    
+    def _reset_session_counters(self) -> None:
+        """重置会话计数"""
+        self._session_started_at = time.time()
+        self._requests_since_rotation = 0
+    
+    def _apply_dynamic_headers(self) -> None:
+        """根据配置动态更新会话请求头"""
+        base_headers = self.headers.copy()
+        
+        random_headers = None
+        if self.randomize_user_agent or self.add_fingerprint_header:
+            try:
+                random_headers = smart_request_manager.anti_detection.get_random_headers(
+                    referer=f"{self.base_url}/china/adv"
+                )
+            except Exception:
+                random_headers = None
+        
+        if self.randomize_user_agent and random_headers:
+            base_headers['User-Agent'] = random_headers.get('User-Agent', base_headers.get('User-Agent'))
+        if self.add_referer_header:
+            base_headers.setdefault('Referer', f"{self.base_url}/china/adv")
+        if self.add_fingerprint_header and random_headers:
+            fingerprint_header = random_headers.get('X-Client-Data')
+            if fingerprint_header:
+                base_headers['X-Client-Data'] = fingerprint_header
+        
+        self.headers = base_headers.copy()
+        self.session.headers.clear()
+        self.session.headers.update(base_headers)
+    
+    def _prepare_request_headers(self, headers: Optional[Dict] = None) -> Dict:
+        """合并基础请求头与动态头信息"""
+        combined = self.session.headers.copy()
+        
+        additional_random_headers = None
+        if self.randomize_user_agent or self.add_fingerprint_header:
+            try:
+                additional_random_headers = smart_request_manager.anti_detection.get_random_headers(
+                    referer=f"{self.base_url}/china/adv"
+                )
+            except Exception:
+                additional_random_headers = None
+        
+        if self.randomize_user_agent and additional_random_headers:
+            combined['User-Agent'] = additional_random_headers.get('User-Agent', combined.get('User-Agent'))
+        if self.add_referer_header:
+            combined.setdefault('Referer', f"{self.base_url}/china/adv")
+        if self.add_fingerprint_header and additional_random_headers:
+            fingerprint_header = additional_random_headers.get('X-Client-Data')
+            if fingerprint_header:
+                combined['X-Client-Data'] = fingerprint_header
+        
+        if headers:
+            combined.update(headers)
+        return combined
+    
+    def _maybe_rotate_session(self, force: bool = False) -> bool:
+        """根据配置判断是否需要轮换会话"""
+        if not self.enable_session_rotation:
+            return False
+        
+        now = time.time()
+        need_rotate = force
+        if self.session_rotation_interval and now - self._session_started_at >= self.session_rotation_interval:
+            need_rotate = True
+        if (self.max_requests_per_session and
+                self._requests_since_rotation >= self.max_requests_per_session):
+            need_rotate = True
+        
+        if not need_rotate:
+            return False
+        
+        rotated = self._rotate_session()
+        if rotated:
+            self._reset_session_counters()
+            self._apply_dynamic_headers()
+        return rotated
+    
+    def _apply_rate_limit(self) -> None:
+        """按照配置限制请求频率"""
+        if not self.rate_limit_enabled or self.requests_per_minute <= 0:
+            return
+        
+        now = time.time()
+        window = 60.0
+        while self._request_timestamps and now - self._request_timestamps[0] > window:
+            self._request_timestamps.popleft()
+        
+        if len(self._request_timestamps) >= self.requests_per_minute:
+            earliest = self._request_timestamps[0]
+            sleep_time = window - (now - earliest) + 0.01
+            if sleep_time > 0:
+                time.sleep(min(sleep_time, self.max_delay))
+        
+        self._request_timestamps.append(time.time())
+    
+    def _get_delay_range_for_speed(self, speed_mode: Optional[str] = None) -> Tuple[float, float]:
+        """根据速度模式返回延迟区间"""
+        mode = speed_mode or self.speed_mode or "正常速度"
+        base_min = self.min_delay
+        base_max = self.max_delay
+        if mode == "快速模式":
+            factor = 0.5
+        elif mode == "慢速模式":
+            factor = 2.0
+        else:
+            factor = 1.0
+        delay_min = max(0.0, base_min * factor)
+        delay_max = max(delay_min, base_max * factor)
+        return delay_min, delay_max
+    
+    def _sleep_between_requests(self, speed_mode: Optional[str] = None, disable_speed_limit: bool = False) -> None:
+        """根据配置在请求之间延迟"""
+        if disable_speed_limit:
+            return
+        if not self.random_delay_enabled:
+            time.sleep(self.min_delay)
+            return
+        
+        delay_min, delay_max = self._get_delay_range_for_speed(speed_mode)
+        delay = random.uniform(delay_min, delay_max)
+        # 根据行为强度稍微波动
+        jitter = random.uniform(-0.1, 0.1) * (self.behavior_intensity / 10)
+        delay *= (1 + jitter)
+        if delay < 0:
+            delay = 0
+        time.sleep(delay)
+    
+    def _session_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Optional[Dict] = None,
+        data: Optional[Dict] = None,
+        timeout: int = 15
+    ) -> Tuple[Optional[requests.Response], Dict]:
+        """使用会话对象发送请求，并应用所有防反爬策略"""
+        request_info = {
+            'url': url,
+            'method': method,
+            'headers': headers or {},
+            'timeout': timeout
+        }
+        
+        self._apply_rate_limit()
+        self._maybe_rotate_session()
+        
+        prepared_headers = self._prepare_request_headers(headers)
+        start_time = time.time()
+        try:
+            response = self.session.request(
+                method=method,
+                url=url,
+                headers=prepared_headers,
+                data=data,
+                timeout=timeout
+            )
+            elapsed = time.time() - start_time
+            request_info['response_time'] = elapsed
+            request_info['status_code'] = response.status_code
+            self._requests_since_rotation += 1
+            
+            if self.monitor:
+                success = 200 <= response.status_code < 400
+                error_type = None if success else f"HTTP {response.status_code}"
+                self.monitor.record_request(url, success=success, error_type=error_type)
+            
+            return response, request_info
+        except requests.RequestException as exc:
+            elapsed = time.time() - start_time
+            request_info['error'] = str(exc)
+            request_info['response_time'] = elapsed
+            self._requests_since_rotation += 1
+            if self.monitor:
+                self.monitor.record_request(url, success=False, error_type=type(exc).__name__)
+            return None, request_info
+    
+    def _session_get(
+        self,
+        url: str,
+        *,
+        headers: Optional[Dict] = None,
+        timeout: int = 15
+    ) -> Tuple[Optional[requests.Response], Dict]:
+        """封装GET请求"""
+        return self._session_request('GET', url, headers=headers, timeout=timeout)
+    
+    def _session_post(
+        self,
+        url: str,
+        *,
+        headers: Optional[Dict] = None,
+        data: Optional[Dict] = None,
+        timeout: int = 15
+    ) -> Tuple[Optional[requests.Response], Dict]:
+        """封装POST请求"""
+        return self._session_request('POST', url, headers=headers, data=data, timeout=timeout)
+    
     def __init__(self, disable_proxy=False):
         # 初始化基础爬虫，条件性启用代理
         super().__init__("广东省政策爬虫", enable_proxy=not disable_proxy)
@@ -89,13 +357,17 @@ class GuangdongSpider(EnhancedBaseCrawler):
         # 分类年份统计缓存
         self.category_year_counts: Dict[str, List[Tuple[int, int]]] = {}
         
+        # 载入运行时配置
+        self._load_runtime_settings()
+        
         self._init_session()
     
     def _init_session(self):
         """初始化会话"""
         self.session = requests.Session()
+        self._reset_session_counters()
         
-        # 更新headers，移除AJAX相关标识
+        # 更新headers，移除AJAX相关标识并应用动态配置
         self.headers.update({
             'Origin': 'https://gd.pkulaw.com',
             'Referer': 'https://gd.pkulaw.com/dfxfg/adv',
@@ -104,14 +376,15 @@ class GuangdongSpider(EnhancedBaseCrawler):
             'sec-ch-ua-platform': '"Windows"',
         })
         
-        self.session.headers.update(self.headers)
+        self._apply_dynamic_headers()
         
         # 设置Cookie（使用随机值降低指纹风险）
-        self.session.cookies.set(
-            'JSESSIONID',
-            uuid.uuid4().hex.upper(),
-            domain='gd.pkulaw.com'
-        )
+        if self.enable_cookie_management:
+            self.session.cookies.set(
+                'JSESSIONID',
+                uuid.uuid4().hex.upper(),
+                domain='gd.pkulaw.com'
+            )
         
         # ✅ 添加代理支持 - 使用共享代理系统
         if self.enable_proxy:
@@ -187,19 +460,16 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 else:
                     logger.warning("[代理验证] 警告: 启用代理但会话中未检测到代理设置")
             
-            resp = self.session.get(self.base_url, timeout=10)
-            if resp.status_code == 200:
-                if hasattr(self, 'monitor') and self.monitor:
-                    self.monitor.record_request(self.base_url, success=True)
+            resp, _ = self._session_get(self.base_url, timeout=10)
+            if resp and resp.status_code == 200:
                 logger.info("成功访问首页，获取必要Cookie")
                 
                 # 验证请求是否使用了代理（通过检查响应头或日志）
                 if self.enable_proxy and hasattr(self.session, 'proxies') and self.session.proxies:
                     logger.info(f"[代理验证] 请求已使用代理: {self.session.proxies}")
             else:
-                if hasattr(self, 'monitor') and self.monitor:
-                    self.monitor.record_request(self.base_url, success=False, error_type=f"HTTP {resp.status_code}")
-                logger.warning(f"访问首页失败，状态码: {resp.status_code}")
+                status = resp.status_code if resp else "No response"
+                logger.warning(f"访问首页失败，状态码: {status}")
         except requests.exceptions.Timeout as e:
             if hasattr(self, 'monitor') and self.monitor:
                 self.monitor.record_request(self.base_url, success=False, error_type="timeout")
@@ -219,6 +489,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
     
     def _rotate_session(self):
         """轮换会话，避免访问限制 (借鉴 old)"""
+        if not self.enable_session_rotation:
+            return False
         logger.info("轮换会话，避免访问限制...")
         
         # 创建新的会话
@@ -226,10 +498,11 @@ class GuangdongSpider(EnhancedBaseCrawler):
         new_session.headers.update(self.headers)
         
         # 生成新的JSESSIONID (随机)
-        import random
-        import string
-        new_jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
-        new_session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
+        if self.enable_cookie_management:
+            import random
+            import string
+            new_jsessionid = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+            new_session.cookies.set('JSESSIONID', new_jsessionid, domain='gd.pkulaw.com')
         
         # 如果启用代理，设置到新会话
         if self.enable_proxy:
@@ -248,6 +521,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
             if resp.status_code == 200:
                 logger.info("成功轮换会话")
                 self.session = new_session
+                self._reset_session_counters()
+                self._apply_dynamic_headers()
                 # 更新 monitor 如果存在
                 if hasattr(self, 'monitor'):
                     self.monitor.record_request(self.base_url, success=True)
@@ -289,25 +564,20 @@ class GuangdongSpider(EnhancedBaseCrawler):
         while retry_count < max_retries:
             try:
                 # 1. 先请求翻页校验接口 (如果 api_config 提供)
-                check_success = True
                 if api_config:
                     check_url = f"{self.base_url}/VerificationCode/GetRecordListTurningLimit"
                     check_headers = self.headers.copy()
                     check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                     
                     logger.debug(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
-                    try:
-                        check_resp, check_info = self.post_page(check_url, data=search_params, headers=check_headers)
-                        if check_resp and check_resp.status_code == 200:
-                            self.monitor.record_request(check_url, success=True)
-                        else:
-                            self.monitor.record_request(check_url, success=False, error_type=f"HTTP {check_resp.status_code if check_resp else 'No response'}")
-                            logger.warning(f"翻页校验失败: {check_resp.status_code if check_resp else 'No response'}")
-                            check_success = False
-                    except Exception as check_error:
-                        self.monitor.record_request(check_url, success=False, error_type=str(check_error))
-                        logger.warning(f"翻页校验请求失败: {check_error}")
-                        check_success = False
+                    check_resp, check_info = self._session_post(
+                        check_url,
+                        data=search_params,
+                        headers=check_headers,
+                        timeout=15
+                    )
+                    if not check_resp or check_resp.status_code != 200:
+                        logger.warning(f"翻页校验失败: {check_info.get('status_code', 'No response')}")
                 
                 # 2. 再请求数据接口
                 if api_config:
@@ -324,7 +594,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 
                 logger.debug(f"请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 
-                search_resp, search_info = self.post_page(search_url, data=search_params, headers=search_headers)
+                search_resp, search_info = self._session_post(
+                    search_url,
+                    data=search_params,
+                    headers=search_headers,
+                    timeout=20
+                )
                 
                 if search_resp and search_resp.status_code == 200:
                     # 检查响应内容是否包含访问限制
@@ -344,7 +619,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     
                     # 如果是403或429错误，尝试轮换会话
                     if search_resp and search_resp.status_code in [403, 429]:
-                        logger.info(f"检测到访问限制，尝试轮换会话...")
+                        logger.info("检测到访问限制，尝试轮换会话...")
                         if self._rotate_session():
                             logger.info("会话轮换成功，重试请求")
                             retry_count += 1
@@ -2673,7 +2948,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 if api_config.get('referer'):
                     headers['Referer'] = api_config['referer']
 
-                resp = self.session.get(adv_url, headers=headers, timeout=15)
+                resp, _ = self._session_get(adv_url, headers=headers, timeout=15)
                 if resp.status_code == 200:
                     years_info = self.extract_years_from_page(resp.text)
                     if years_info:
@@ -2826,8 +3101,6 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     api_config=api_config
                 )
 
-                headers = self.headers.copy()
-
                 resp = self._request_page_with_check(
                     page_index,
                     search_params,
@@ -2907,8 +3180,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             page_index += 1
 
             # 添加延时避免过快
-            if not disable_speed_limit:
-                time.sleep(1)
+            self._sleep_between_requests(self.speed_mode, disable_speed_limit)
 
         logger.debug(f"{category_name}{year_info} 爬取完成，共获取 {len(policies)} 条政策")
         return policies
@@ -3013,12 +3285,6 @@ class GuangdongSpider(EnhancedBaseCrawler):
         
         # 设置速度模式
         self.speed_mode = speed_mode
-        if speed_mode == "快速模式":
-            delay_range = (0.5, 1.5)
-        elif speed_mode == "慢速模式":
-            delay_range = (2, 4)
-        else:  # 正常速度
-            delay_range = (1, 2)  # noqa: F841 - used later in random.uniform(*delay_range)
         
         # 获取所有分类（使用扁平化列表）
         categories = self._get_flat_categories()
@@ -3166,18 +3432,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
         
         # 会话轮换计数器
         session_rotation_counter = 0
-        max_requests_per_session = 50  # 每50个请求轮换一次会话
         
-        # 设置速度模式 - 增加延迟避免访问限制
+        # 设置速度模式 - 后续延迟统一由 _sleep_between_requests 控制
         self.speed_mode = speed_mode
-        if disable_speed_limit:
-            delay_range = (1.0, 3.0)  # 增加延迟避免访问限制
-        elif speed_mode == "快速模式":
-            delay_range = (2.0, 5.0)  # 增加延迟
-        elif speed_mode == "慢速模式":
-            delay_range = (5.0, 10.0)  # 更慢的延迟
-        else:  # 正常速度
-            delay_range = (3.0, 7.0)  # 增加正常延迟
         
         all_policies = []
         
@@ -3257,9 +3514,10 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     
                     # 会话轮换逻辑
                     session_rotation_counter += 1
-                    if session_rotation_counter >= max_requests_per_session:
-                        logger.debug(f"已请求 {session_rotation_counter} 次，轮换会话...")
-                        if self._rotate_session():
+                    if (self.enable_session_rotation and self.max_requests_per_session and
+                            session_rotation_counter >= self.max_requests_per_session):
+                        logger.debug(f"已请求 {session_rotation_counter} 次，尝试强制轮换会话...")
+                        if self._maybe_rotate_session(force=True):
                             session_rotation_counter = 0
                             logger.info("会话轮换成功")
                         else:
@@ -3301,10 +3559,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     
                     page_index += 1
                     
-                    # 添加延时（快速模式下延迟更短）
-                    if not disable_speed_limit:
-                        delay = random.uniform(*delay_range)
-                        time.sleep(delay)
+                    # 添加延时（根据配置）
+                    self._sleep_between_requests(self.speed_mode, disable_speed_limit)
                         
                 except requests.exceptions.Timeout as e:
                     logger.warning(f"请求超时: {e}", exc_info=True)
@@ -3388,15 +3644,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
     def _fetch_category_year_counts(self, category_code: str, api_config: Dict[str, str]) -> List[Tuple[int, int]]:
         """获取指定分类的年份分布数据"""
         try:
-            params = {"ClassCodeKey": f",,,{category_code},,,"}
-
             adv_url = api_config.get("init_page", f"{self.base_url}/{api_config['menu']}/adv")
             headers = self.headers.copy()
             headers["Referer"] = adv_url
 
-            resp = self.session.get(
+            resp, _ = self._session_get(
                 adv_url,
-                params=params,
                 headers=headers,
                 timeout=20,
             )
@@ -3517,8 +3770,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
             'ClassCodeKey': f",,,{target_year}",
         })
         try:
-            resp_class = self.session.post(class_search_url, data=class_params, headers=headers, timeout=20)
-            resp_class.raise_for_status()
+            resp_class, _ = self._session_post(
+                class_search_url,
+                data=class_params,
+                headers=headers,
+                timeout=20
+            )
+            if not resp_class or resp_class.status_code != 200:
+                raise requests.RequestException(f"ClassSearch HTTP {resp_class.status_code if resp_class else 'No response'}")
             logger.debug(f"ClassSearch for {target_year} 成功")
         except Exception as e:
             logger.error(f"ClassSearch 失败: {e}")
@@ -3632,10 +3891,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
 
     def _get_delay(self) -> float:
         """统一处理抓取间隔，若父类未实现则使用默认值。"""
-        parent = super()
-        if hasattr(parent, '_get_delay'):
-            return parent._get_delay()  # type: ignore[attr-defined]
-        return 0.5
+        delay_min, delay_max = self._get_delay_range_for_speed(self.speed_mode)
+        return random.uniform(delay_min, delay_max)
 
 class GuangdongMultiThreadSpider(MultiThreadBaseCrawler):
     """广东省多线程爬虫"""

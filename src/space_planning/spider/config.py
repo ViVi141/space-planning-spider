@@ -6,10 +6,11 @@
 """
 
 from enum import Enum
-from typing import Dict, Any, Optional
+from typing import Any, Optional
 import json
 import os
 import logging
+from copy import deepcopy
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,9 @@ class CrawlerConfig:
             },
             'session_settings': {
                 'rotation_interval': 300,  # 5分钟
-                'max_requests_per_session': 50
+                'max_requests_per_session': 50,
+                'enable_rotation': True,
+                'enable_cookie_management': True
             },
             'headers_settings': {
                 'randomize_user_agent': True,
@@ -47,12 +50,17 @@ class CrawlerConfig:
                 'simulate_human_behavior': True,
                 'random_delay': True,
                 'mouse_movement': False,  # 正常模式默认关闭
-                'scroll_simulation': False  # 正常模式默认关闭
+                'scroll_simulation': False,  # 正常模式默认关闭
+                'intensity': 5
             },
             'proxy_settings': {
                 'enabled': False,
                 'api_url': None,
                 'rotation_strategy': 'quality'
+            },
+            'rate_limit_settings': {
+                'enabled': False,
+                'max_requests_per_minute': 60
             }
         }
         
@@ -70,7 +78,9 @@ class CrawlerConfig:
             },
             'session_settings': {
                 'rotation_interval': 180,  # 3分钟
-                'max_requests_per_session': 30
+                'max_requests_per_session': 30,
+                'enable_rotation': True,
+                'enable_cookie_management': True
             },
             'headers_settings': {
                 'randomize_user_agent': True,
@@ -81,27 +91,42 @@ class CrawlerConfig:
                 'simulate_human_behavior': True,
                 'random_delay': True,
                 'mouse_movement': True,  # 增强模式启用鼠标模拟
-                'scroll_simulation': True  # 增强模式启用滚动模拟
+                'scroll_simulation': True,  # 增强模式启用滚动模拟
+                'intensity': 7
             },
             'proxy_settings': {
                 'enabled': False,
                 'api_url': None,
                 'rotation_strategy': 'quality'
+            },
+            'rate_limit_settings': {
+                'enabled': True,
+                'max_requests_per_minute': 40
             }
         }
         
         # 当前配置
-        self.current_config = self.default_config.copy()
+        self.current_config = deepcopy(self.default_config)
         self.current_mode = AntiDetectionMode.NORMAL
+
+    def _deep_merge(self, base: dict, override: dict) -> dict:
+        """递归合并配置，override 优先"""
+        merged = deepcopy(base)
+        for key, value in override.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._deep_merge(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
     
     def set_mode(self, mode: AntiDetectionMode) -> None:
         """设置防检测模式"""
         self.current_mode = mode
         
         if mode == AntiDetectionMode.NORMAL:
-            self.current_config = self.default_config.copy()
+            self.current_config = deepcopy(self.default_config)
         else:
-            self.current_config = self.enhanced_config.copy()
+            self.current_config = deepcopy(self.enhanced_config)
         
         logger.info(f"已切换到{mode.value}模式")
     
@@ -136,7 +161,7 @@ class CrawlerConfig:
         
         # 导航到父级
         for k in keys[:-1]:
-            if k not in config:
+            if k not in config or not isinstance(config[k], dict):
                 config[k] = {}
             config = config[k]
         
@@ -224,7 +249,9 @@ class CrawlerConfig:
             
             mode_value = config_data.get('mode', 'normal')
             self.current_mode = AntiDetectionMode(mode_value)
-            self.current_config = config_data.get('config', self.default_config)
+            base_config = self.default_config if self.current_mode == AntiDetectionMode.NORMAL else self.enhanced_config
+            stored_config = config_data.get('config', {})
+            self.current_config = self._deep_merge(base_config, stored_config)
             
             print(f"配置已从 {file_path} 加载")
             return True

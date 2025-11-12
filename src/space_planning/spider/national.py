@@ -2,27 +2,14 @@ import requests
 from datetime import datetime
 import time
 import random
-import sys
-import os
 import logging
 from typing import Dict, Optional
 
-# 添加路径以便导入模块
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
-
-from core import database as db
+from ..core import database as db
 from .anti_crawler import AntiCrawlerManager
 from .monitor import CrawlerMonitor
 from .spider_config import SpiderConfig
 from bs4 import BeautifulSoup, Tag
-from ..core.exceptions import (
-    NetworkError,
-    ConnectionTimeoutError,
-    HTTPError,
-    ParseError
-)
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +58,7 @@ class NationalSpider:
                 if stats and stats.get('running', False):
                     # 代理池已运行
                     return True
-            except:
+            except Exception:
                 pass
             
             # 初始化代理池
@@ -104,27 +91,9 @@ class NationalSpider:
         """
         logger.info(f"NationalSpider.crawl_policies 开始执行: keywords={keywords}, start_date={start_date}, end_date={end_date}, speed_mode={speed_mode}")
         
-        # 设置速度模式
+        # 设置速度模式并应用统一配置
         self.speed_mode = speed_mode
-        
-        # 根据速度模式调整防反爬虫设置
-        if disable_speed_limit:
-            # 禁用速度限制：最快速度，忽略所有延迟
-            self.anti_crawler.min_delay = 0.0
-            self.anti_crawler.max_delay = 0.0
-            self.anti_crawler.max_requests_per_minute = 999999  # 无限制
-        elif speed_mode == "快速模式":
-            self.anti_crawler.min_delay = 0.1
-            self.anti_crawler.max_delay = 0.3
-            self.anti_crawler.max_requests_per_minute = 100
-        elif speed_mode == "慢速模式":
-            self.anti_crawler.min_delay = 2.0
-            self.anti_crawler.max_delay = 5.0
-            self.anti_crawler.max_requests_per_minute = 10
-        else:  # 正常速度
-            self.anti_crawler.min_delay = 0.2
-            self.anti_crawler.max_delay = 0.8
-            self.anti_crawler.max_requests_per_minute = 60
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         
         policies = []
         # 从通用配置获取页面大小
@@ -173,7 +142,6 @@ class NationalSpider:
                 
                 # 合并请求头
                 headers = self.special_headers.copy()
-                headers.update(self.anti_crawler.get_random_headers())
                 
                 # 使用防反爬虫管理器发送请求（已集成代理支持）
                 try:
@@ -467,8 +435,6 @@ class NationalSpider:
             
             # 使用防反爬虫管理器发送请求
             headers = self.special_headers.copy()
-            headers.update(self.anti_crawler.get_random_headers())
-            
             try:
                 resp = self.anti_crawler.make_request(url, headers=headers)
             except requests.exceptions.RequestException as e:

@@ -362,9 +362,10 @@ CATEGORY_API_MAP = {
 ```
 
 ## 监控、限速与代理
-- 所有请求通过 `CrawlerMonitor` 记录成功率与异常类型，便于 GUI 状态面板使用。
-- 速度模式与延时控制在 `crawl_policies_optimized` 内设置随机区间，兼顾反爬策略。
-- 代理在 `_init_session`、多线程 `_execute_task` 中通过共享池复用，并提供 `ProxyVerifier` 校验。
+- 所有请求通过统一的 `AntiCrawlerManager` 读取 `crawler_config`，集中处理随机 UA、浏览器指纹、会话轮换、频率限制与行为模拟。
+- `CrawlerMonitor` 持续记录成功率与异常类型，供 GUI 状态面板与日志排查使用。
+- 速度模式（快速/正常/慢速）与随机延迟不再由单个函数硬编码，而是由配置驱动，确保单线程/多线程保持一致节奏。
+- 代理在初始化或轮换会话时自动刷新，共享代理池由管理器统一调度并回报成功率。
 
 ```202:2060:src/space_planning/spider/guangdong.py
     def get_crawler_status(self):

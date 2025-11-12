@@ -202,76 +202,21 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                 if callback:
                     callback(f"线程 {thread_name} 分类[{category_name}]搜索参数: {search_query}")
                 
-                # 使用线程专用会话发送请求
-                with lock:
-                    # 应用防反爬虫延迟
-                    time.sleep(random.uniform(self.anti_crawler.min_delay, self.anti_crawler.max_delay))
-                    
-                    # 记录重试次数
-                    retry_count = 0
-                    max_retries = 3
-                    
-                    while retry_count < max_retries:
-                        try:
-                            # 检查是否需要停止
-                            if hasattr(self, 'check_stop') and self.check_stop():
-                                logger.info(f"线程 {thread_name} 检测到停止信号，退出重试")
-                                if callback:
-                                    callback(f"线程 {thread_name} 已停止")
-                                break
-                            
-                            response = session.get(
-                                self.search_api,
-                                params=params,
-                                headers=self.headers,
-                                timeout=15
-                            )
-                            
-                            # 请求成功，跳出重试循环
-                            break
-                            
-                        except Exception as e:
-                            retry_count += 1
-                            error_msg = str(e)
-                            
-                            # 检查是否需要停止
-                            if hasattr(self, 'check_stop') and self.check_stop():
-                                logger.info(f"线程 {thread_name} 检测到停止信号，退出重试")
-                                if callback:
-                                    callback(f"线程 {thread_name} 已停止")
-                                break
-                            
-                            # 处理代理错误
-                            if ('ProxyError' in error_msg or '503' in error_msg or 
-                                'Tunnel connection failed' in error_msg or 
-                                'Connection timeout' in error_msg or
-                                'Connection refused' in error_msg):
-                                
-                                logger.warning(f"线程 {thread_name} 分类[{category_name}]代理错误 (重试 {retry_count}/{max_retries}): {error_msg}")
-                                
-                                # 尝试轮换代理
-                                if self.enable_proxy and hasattr(self, '_rotate_thread_proxy'):
-                                    if self._rotate_thread_proxy():
-                                        logger.info(f"线程 {thread_name} 轮换代理后重试")
-                                        continue  # 继续重试
-                                    else:
-                                        logger.error(f"线程 {thread_name} 无法获取新代理")
-                                        break
-                                else:
-                                    logger.error(f"线程 {thread_name} 代理已禁用，无法轮换")
-                                    break
-                            else:
-                                logger.error(f"线程 {thread_name} 分类[{category_name}]请求异常: {error_msg}")
-                                break
-                    
-                    # 如果在重试循环中被停止，跳出外层循环
-                    if hasattr(self, 'check_stop') and self.check_stop():
-                        break
-                    
-                    # 如果所有重试都失败了
-                    if retry_count >= max_retries:
-                        logger.error(f"线程 {thread_name} 分类[{category_name}]第{page}页请求失败，已达到最大重试次数")
-                        break
+                # 使用统一请求管理器发送请求
+                try:
+                    with lock:
+                        self.anti_crawler.sleep_between_requests(disable_speed_limit)
+                        response = self.anti_crawler.make_request(
+                            self.search_api,
+                            method='GET',
+                            params=params,
+                            headers=self.headers.copy(),
+                            timeout=15
+                        )
+                except Exception as e:
+                    self.monitor.record_request(self.search_api, False)
+                    logger.error(f"线程 {thread_name} 分类[{category_name}]请求失败: {e}")
+                    break
                 
                 # 记录请求
                 self.monitor.record_request(self.search_api, response.status_code == 200)
@@ -569,6 +514,8 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                       category=None):
         """兼容原有接口的多线程爬取方法"""
         self.speed_mode = speed_mode
+        self.disable_speed_limit = disable_speed_limit
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         self.keywords = keywords  # 保存关键词供_execute_task使用
         
         # 如果指定了分类，过滤任务
@@ -594,6 +541,8 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                                   category=None):
         """多线程爬取政策（兼容广东省爬虫接口）"""
         self.speed_mode = speed_mode
+        self.disable_speed_limit = disable_speed_limit
+        self.anti_crawler.configure_speed_mode(speed_mode, disable_speed_limit)
         self.keywords = keywords  # 保存关键词供_execute_task使用
         
         # 如果指定了分类，过滤任务

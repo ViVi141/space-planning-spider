@@ -181,7 +181,7 @@ class CrawlerSettingsDialog(QDialog):
         
         self.enable_rate_limiting = QCheckBox("启用频率限制")
         self.requests_per_minute = QSpinBox()
-        self.requests_per_minute.setRange(1, 100)
+        self.requests_per_minute.setRange(1, 200)
         self.requests_per_minute.setSuffix(" 次/分钟")
         
         rate_layout.addRow(self.enable_rate_limiting)
@@ -286,6 +286,14 @@ class CrawlerSettingsDialog(QDialog):
         # 设置会话
         self.session_rotation_spin.setValue(crawler_config.get_config('session_settings.rotation_interval'))
         self.max_requests_spin.setValue(crawler_config.get_config('session_settings.max_requests_per_session'))
+        enable_rotation = crawler_config.get_config('session_settings.enable_rotation')
+        if enable_rotation is None:
+            enable_rotation = True
+        self.enable_session_rotation.setChecked(bool(enable_rotation))
+        enable_cookie = crawler_config.get_config('session_settings.enable_cookie_management')
+        if enable_cookie is None:
+            enable_cookie = True
+        self.enable_cookie_management.setChecked(bool(enable_cookie))
         
         # 设置请求头
         self.random_ua_check.setChecked(crawler_config.get_config('headers_settings.randomize_user_agent'))
@@ -297,6 +305,23 @@ class CrawlerSettingsDialog(QDialog):
         self.random_delay_check.setChecked(crawler_config.get_config('behavior_settings.random_delay'))
         self.mouse_movement_check.setChecked(crawler_config.get_config('behavior_settings.mouse_movement'))
         self.scroll_simulation_check.setChecked(crawler_config.get_config('behavior_settings.scroll_simulation'))
+        intensity_value = crawler_config.get_config('behavior_settings.intensity')
+        if not isinstance(intensity_value, (int, float)):
+            intensity_value = 5
+        intensity_value = max(1, min(int(intensity_value), self.behavior_intensity_slider.maximum()))
+        self.behavior_intensity_slider.setValue(intensity_value)
+        self.intensity_label.setText(str(intensity_value))
+
+        # 设置频率限制
+        enable_rate_limit = crawler_config.get_config('rate_limit_settings.enabled')
+        if enable_rate_limit is None:
+            enable_rate_limit = False
+        self.enable_rate_limiting.setChecked(bool(enable_rate_limit))
+        rpm_value = crawler_config.get_config('rate_limit_settings.max_requests_per_minute')
+        if not isinstance(rpm_value, int):
+            rpm_value = 60
+        rpm_value = max(self.requests_per_minute.minimum(), min(rpm_value, self.requests_per_minute.maximum()))
+        self.requests_per_minute.setValue(rpm_value)
     
     def save_settings(self):
         """保存设置"""
@@ -316,6 +341,8 @@ class CrawlerSettingsDialog(QDialog):
             # 保存会话设置
             crawler_config.set_config('session_settings.rotation_interval', self.session_rotation_spin.value())
             crawler_config.set_config('session_settings.max_requests_per_session', self.max_requests_spin.value())
+            crawler_config.set_config('session_settings.enable_rotation', self.enable_session_rotation.isChecked())
+            crawler_config.set_config('session_settings.enable_cookie_management', self.enable_cookie_management.isChecked())
             
             # 保存请求头设置
             crawler_config.set_config('headers_settings.randomize_user_agent', self.random_ua_check.isChecked())
@@ -327,6 +354,11 @@ class CrawlerSettingsDialog(QDialog):
             crawler_config.set_config('behavior_settings.random_delay', self.random_delay_check.isChecked())
             crawler_config.set_config('behavior_settings.mouse_movement', self.mouse_movement_check.isChecked())
             crawler_config.set_config('behavior_settings.scroll_simulation', self.scroll_simulation_check.isChecked())
+            crawler_config.set_config('behavior_settings.intensity', self.behavior_intensity_slider.value())
+
+            # 保存频率限制设置
+            crawler_config.set_config('rate_limit_settings.enabled', self.enable_rate_limiting.isChecked())
+            crawler_config.set_config('rate_limit_settings.max_requests_per_minute', self.requests_per_minute.value())
             
             # 保存到文件
             crawler_config.save_config()

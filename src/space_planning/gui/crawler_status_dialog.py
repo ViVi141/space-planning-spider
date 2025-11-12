@@ -4,15 +4,11 @@
 爬虫状态实时监控对话框
 """
 
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-                             QTextEdit, QGroupBox, QProgressBar, QCheckBox, QSpinBox, QFrame)
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QColor
-import os
-from datetime import datetime
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+                             QGroupBox, QProgressBar, QFrame, QMessageBox)
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal
 from typing import Dict, Optional
 
-from ..spider.national import NationalSpider
 import logging
 
 logger = logging.getLogger(__name__)
@@ -34,8 +30,20 @@ class StatusUpdateThread(QThread):
             try:
                 # 动态获取当前爬虫实例
                 current_spider = self.get_current_spider()
-                status = current_spider.get_crawler_status()
-                self.status_signal.emit(status)
+                status = {}
+                session_info = {}
+                if current_spider:
+                    if hasattr(current_spider, 'get_crawler_status'):
+                        status = current_spider.get_crawler_status() or {}
+                    if hasattr(current_spider, 'get_session_info'):
+                        try:
+                            session_info = current_spider.get_session_info() or {}
+                        except Exception:
+                            session_info = {}
+                self.status_signal.emit({
+                    'status': status,
+                    'session': session_info
+                })
             except Exception as e:
                 self.error_signal.emit(str(e))
             
@@ -49,7 +57,7 @@ class StatusUpdateThread(QThread):
             if hasattr(self, 'dialog') and self.dialog:
                 return self.dialog.get_current_spider()
             return self.spider
-        except:
+        except Exception:
             return self.spider
     
     def get_all_spiders_status(self):
@@ -84,6 +92,42 @@ class ProxyStatusWidget(QFrame):
         super().__init__(parent)
         self.setFrameStyle(QFrame.Panel | QFrame.Raised)
         self.setup_ui()
+    
+    @staticmethod
+    def _to_float(value, default=0.0):
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                value = value.strip()
+                if not value:
+                    return default
+                return float(value)
+            except ValueError:
+                return default
+        return default
+    
+    @staticmethod
+    def _to_int(value, default=0):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                value = value.strip()
+                if not value:
+                    return default
+                return int(float(value))
+            except ValueError:
+                return default
+        return default
         
     def setup_ui(self):
         """初始化UI"""
@@ -166,7 +210,7 @@ class ProxyStatusWidget(QFrame):
             self.current_proxy_label.setStyleSheet("color: orange;")
         
         # 更新评分
-        score = proxy_info.get('score', 0)
+        score = self._to_float(proxy_info.get('score'), 0.0)
         self.proxy_score_label.setText(f"{score:.1f}")
         if score >= 80:
             self.proxy_score_label.setStyleSheet("color: green;")
@@ -176,17 +220,18 @@ class ProxyStatusWidget(QFrame):
             self.proxy_score_label.setStyleSheet("color: red;")
         
         # 更新响应时间
-        response_time = proxy_info.get('response_time')
+        response_time = self._to_float(proxy_info.get('response_time'), None)
         if response_time is not None:
             self.response_time_label.setText(f"{response_time:.2f}s")
         else:
             self.response_time_label.setText("-")
         
         # 更新使用次数
-        self.usage_count_label.setText(str(proxy_info.get('usage_count', 0)))
+        usage_count = self._to_int(proxy_info.get('usage_count'), 0)
+        self.usage_count_label.setText(str(usage_count))
 
         # 更新重试次数
-        retry_count = proxy_info.get('retry_count', 0)
+        retry_count = self._to_int(proxy_info.get('retry_count'), 0)
         if retry_count > 0:
             self.retry_count_label.setText(f"{retry_count} (重试中)")
             self.retry_count_label.setStyleSheet("color: orange;")
@@ -201,6 +246,7 @@ class CrawlerStatusDialog(QDialog):
         super().__init__(parent)
         self.crawler = crawler
         self.is_closing = False  # 标记对话框是否正在关闭
+        self.status_thread: Optional[StatusUpdateThread] = None
         try:
             self.setup_ui()
             # 延迟启动监控，确保UI已完全初始化
@@ -209,6 +255,75 @@ class CrawlerStatusDialog(QDialog):
             logger.error(f"初始化爬虫状态对话框失败: {e}", exc_info=True)
             # 即使初始化失败，也要显示对话框，但提示错误
             QMessageBox.warning(self, "错误", f"初始化失败: {str(e)[:100]}")
+    
+    @staticmethod
+    def _to_float(value, default=0.0):
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                value = value.strip()
+                if not value:
+                    return default
+                return float(value)
+            except ValueError:
+                return default
+        return default
+    
+    @classmethod
+    def _to_int(cls, value, default=0):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                value = value.strip()
+                if not value:
+                    return default
+                return int(float(value))
+            except ValueError:
+                return default
+        return default
+    
+    @classmethod
+    def _sanitize_basic_stats(cls, status: Dict) -> Dict:
+        """确保统计数据为合法数值"""
+        if not isinstance(status, dict):
+            return {
+                'total_pages': 0,
+                'successful_pages': 0,
+                'failed_pages': 0
+            }
+        
+        total_pages = cls._to_int(status.get('total_pages'), 0)
+        successful_pages = cls._to_int(status.get('successful_pages'), 0)
+        failed_pages = cls._to_int(status.get('failed_pages'), 0)
+        
+        if total_pages <= 0 and (successful_pages > 0 or failed_pages > 0):
+            total_pages = successful_pages + failed_pages
+        
+        status['total_pages'] = max(total_pages, 0)
+        status['successful_pages'] = max(successful_pages, 0)
+        status['failed_pages'] = max(failed_pages, 0)
+        
+        progress = status.get('progress')
+        if isinstance(progress, dict):
+            progress_total = cls._to_int(progress.get('total_pages'), 0)
+            progress_completed = cls._to_int(progress.get('completed_urls_count'), 0)
+            progress_failed = cls._to_int(progress.get('failed_urls_count'), 0)
+            progress['total_pages'] = max(progress_total, 0)
+            progress['completed_urls_count'] = max(progress_completed, 0)
+            progress['failed_urls_count'] = max(progress_failed, 0)
+            status['progress'] = progress
+        
+        return status
     
     def setup_ui(self):
         """初始化UI"""
@@ -292,16 +407,21 @@ class CrawlerStatusDialog(QDialog):
         try:
             if self.is_closing:
                 return
-            self.timer = QTimer()
-            self.timer.timeout.connect(self.update_status)
-            self.timer.start(1000)  # 每秒更新一次
+            if not self.crawler:
+                logger.warning("爬虫实例为空，无法启动监控")
+                return
+            if self.status_thread and self.status_thread.isRunning():
+                return
+            self.status_thread = StatusUpdateThread(self.crawler, self)
+            self.status_thread.status_signal.connect(self.on_status_update)
+            self.status_thread.error_signal.connect(self.on_status_error)
+            self.status_thread.start()
         except Exception as e:
             logger.error(f"启动监控失败: {e}", exc_info=True)
             # 即使启动失败也不抛出异常，避免崩溃
     
-    def update_status(self):
-        """更新状态显示"""
-        # 首先检查对话框是否正在关闭或已关闭
+    def on_status_update(self, payload):
+        """处理状态更新信号"""
         if self.is_closing:
             return
         
@@ -310,153 +430,74 @@ class CrawlerStatusDialog(QDialog):
                 logger.debug("对话框已关闭，停止状态更新")
                 self.is_closing = True
                 return
-        except (RuntimeError, AttributeError, Exception):
-            # 对话框可能正在被销毁
+        except (RuntimeError, AttributeError):
             self.is_closing = True
             return
         
-        if not self.crawler:
-            logger.debug("爬虫实例为空，无法更新状态")
+        if not hasattr(self, 'total_label') or not hasattr(self, 'proxy_status'):
+            logger.warning("UI组件未完全初始化，跳过状态更新")
             return
         
-        try:
-            # 检查UI组件是否已初始化
-            if not hasattr(self, 'total_label') or not hasattr(self, 'proxy_status'):
-                logger.warning("UI组件未完全初始化，跳过状态更新")
-                return
-            
-            # 尝试获取爬虫统计信息（使用线程安全的方式）
-            try:
-                stats = self._get_crawler_stats()
-            except Exception as stats_error:
-                logger.error(f"获取爬虫统计信息时出错: {stats_error}", exc_info=True)
-                # 即使出错也尝试显示错误信息
-                try:
-                    if hasattr(self, 'total_label'):
-                        error_msg = str(stats_error)[:50]
-                        self.total_label.setText(f"状态获取失败: {error_msg}")
-                except Exception:
-                    pass
-                return
-            
-            if not stats:
-                logger.warning("无法获取爬虫统计信息")
-                return
-            
-            session = self._get_session_info()
-            
-            # 更新代理状态
-            try:
-                proxy_info = self._extract_proxy_info(stats, session)
-                if hasattr(self, 'proxy_status'):
-                    self.proxy_status.update_status(proxy_info)
-            except Exception as proxy_error:
-                logger.error(f"更新代理状态失败: {proxy_error}", exc_info=True)
-            
-            # 更新重试配置
-            try:
-                self._update_retry_config(stats)
-            except Exception as retry_error:
-                logger.error(f"更新重试配置失败: {retry_error}", exc_info=True)
-            
-            # 更新进度和统计信息
-            try:
-                self._update_progress_and_stats(stats)
-            except Exception as progress_error:
-                logger.error(f"更新进度和统计信息失败: {progress_error}", exc_info=True)
-            
-        except Exception as e:
-            logger.error(f"更新状态失败: {e}", exc_info=True)
-            # 安全地显示错误信息
-            try:
-                if hasattr(self, 'total_label'):
-                    error_msg = str(e)[:50]  # 限制错误消息长度
-                    self.total_label.setText(f"状态更新失败: {error_msg}")
-                    if hasattr(self, 'success_label'):
-                        self.success_label.setText("")
-                    if hasattr(self, 'failed_label'):
-                        self.failed_label.setText("")
-                    if hasattr(self, 'success_rate_label'):
-                        self.success_rate_label.setText("")
-            except Exception as ui_error:
-                logger.error(f"显示错误信息失败: {ui_error}", exc_info=True)
-    
-    def _get_crawler_stats(self):
-        """安全获取爬虫统计信息"""
-        if not self.crawler:
-            logger.debug("爬虫实例为空")
-            return {
-                'total_pages': 0,
-                'successful_pages': 0,
-                'failed_pages': 0,
-                'proxy_enabled': False
-            }
+        if not isinstance(payload, dict):
+            stats = payload if isinstance(payload, dict) else {}
+            session = {}
+        else:
+            stats = payload.get('status') or {}
+            session = payload.get('session') or {}
+        
+        sanitized_stats = self._sanitize_basic_stats(stats)
+        if not isinstance(session, dict):
+            session = {}
         
         try:
-            # 使用最安全的方式获取状态，无论爬虫是否在运行
-            # 在运行时访问状态可能引发各种异常，所以我们统一使用安全方法
-            status = self._safe_get_status()
-            
-            # 如果安全方法返回了有效的状态，继续处理
-            if not isinstance(status, dict):
-                logger.warning(f"安全获取状态返回非字典类型: {type(status)}")
-                status = {}
-            
-            # 如果是多线程爬虫，提取统计信息
-            if 'multithread_stats' in status:
-                multithread_stats = status.get('multithread_stats', {})
-                proxy_stats = status.get('proxy_stats', {})
-                
-                # 转换为标准格式
-                return {
-                    'total_pages': multithread_stats.get('total_tasks', 0),
-                    'successful_pages': multithread_stats.get('completed_tasks', 0),
-                    'failed_pages': multithread_stats.get('failed_tasks', 0),
-                    'proxy_enabled': status.get('enable_proxy', False),
-                    'proxy_status': {
-                        'enabled': status.get('enable_proxy', False),
-                        'current_proxy': proxy_stats.get('current_proxy'),
-                        'proxy_details': proxy_stats.get('proxy_details', [])
-                    },
-                    'multithread_info': {
-                        'active_threads': multithread_stats.get('active_threads', 0),
-                        'total_crawled': multithread_stats.get('total_crawled', 0),
-                        'total_saved': multithread_stats.get('total_saved', 0),
-                        'elapsed_time': multithread_stats.get('elapsed_time', 0)
-                    },
-                    'level': status.get('level', '未知'),
-                    'speed_mode': status.get('speed_mode', '正常速度'),
-                    'categories': status.get('categories', [])
-                }
-            else:
-                # 普通爬虫状态，确保返回字典
-                if not isinstance(status, dict):
-                    status = {}
-                # 确保有必需的字段
-                status.setdefault('total_pages', status.get('total_pages', 0))
-                status.setdefault('successful_pages', status.get('successful_pages', 0))
-                status.setdefault('failed_pages', status.get('failed_pages', 0))
-                status.setdefault('proxy_enabled', False)
-                return status
+            self._apply_status_update(sanitized_stats, session)
         except Exception as e:
-            logger.error(f"获取爬虫统计失败: {e}", exc_info=True)
-            return {
-                'total_pages': 0,
-                'successful_pages': 0,
-                'failed_pages': 0,
-                'proxy_enabled': False
-            }
+            logger.error(f"应用状态更新失败: {e}", exc_info=True)
+            if hasattr(self, 'total_label'):
+                error_msg = str(e)[:50]
+                self.total_label.setText(f"状态更新失败: {error_msg}")
     
-    def _get_session_info(self):
-        """安全获取会话信息"""
+    def on_status_error(self, message: str):
+        """处理状态更新错误"""
+        if self.is_closing:
+            return
+        logger.error(f"爬虫状态监控线程错误: {message}")
+        if hasattr(self, 'total_label'):
+            self.total_label.setText(f"状态获取失败: {str(message)[:50]}")
+    
+    def get_current_spider(self):
+        """供状态线程动态获取当前爬虫"""
+        return self.crawler
+
+    def _apply_status_update(self, stats: Dict, session: Optional[Dict] = None):
+        """根据状态数据更新界面"""
+        if not isinstance(stats, dict):
+            logger.warning("状态数据格式无效，跳过更新")
+            return
+        
+        session = session or {}
+        if not isinstance(session, dict):
+            session = {}
+        
+        # 更新代理状态
         try:
-            if hasattr(self.crawler, 'get_session_info'):
-                return self.crawler.get_session_info()
-            else:
-                return {}
-        except Exception as e:
-            logger.error(f"获取会话信息失败: {e}", exc_info=True)
-            return {}
+            proxy_info = self._extract_proxy_info(stats, session)
+            if hasattr(self, 'proxy_status'):
+                self.proxy_status.update_status(proxy_info)
+        except Exception as proxy_error:
+            logger.error(f"更新代理状态失败: {proxy_error}", exc_info=True)
+        
+        # 更新重试配置
+        try:
+            self._update_retry_config(stats)
+        except Exception as retry_error:
+            logger.error(f"更新重试配置失败: {retry_error}", exc_info=True)
+        
+        # 更新进度与统计
+        try:
+            self._update_progress_and_stats(stats)
+        except Exception as progress_error:
+            logger.error(f"更新进度和统计信息失败: {progress_error}", exc_info=True)
     
     def _extract_proxy_info(self, stats, session):
         """提取代理信息"""
@@ -475,7 +516,8 @@ class CrawlerStatusDialog(QDialog):
                     proxy_status = {}
                 
                 proxy_enabled = proxy_status.get('enabled', False)
-                
+                proxy_enabled = bool(proxy_enabled)
+
                 if proxy_enabled:
                     current_proxy_info = proxy_status.get('current_proxy')
                     if current_proxy_info:
@@ -487,10 +529,10 @@ class CrawlerStatusDialog(QDialog):
                                 return {
                                     'enabled': True,
                                     'current_proxy': f"{ip}:{port}",
-                                    'score': current_proxy_info.get('success_rate', 0) * 100,  # 转换为百分比
-                                    'response_time': current_proxy_info.get('response_time'),
-                                    'usage_count': current_proxy_info.get('use_count', 0),
-                                    'retry_count': current_proxy_info.get('consecutive_failures', 0)
+                                    'score': self._to_float(current_proxy_info.get('success_rate'), 0.0) * 100,  # 转换为百分比
+                                    'response_time': self._to_float(current_proxy_info.get('response_time'), None),
+                                    'usage_count': self._to_int(current_proxy_info.get('use_count'), 0),
+                                    'retry_count': self._to_int(current_proxy_info.get('consecutive_failures'), 0)
                                 }
                         elif isinstance(current_proxy_info, str):
                             # 如果是字符串格式 ip:port
@@ -517,7 +559,7 @@ class CrawlerStatusDialog(QDialog):
                     return None
             
             # 兼容旧格式 - 检查proxy_enabled字段
-            proxy_enabled = stats.get('proxy_enabled', False)
+            proxy_enabled = bool(stats.get('proxy_enabled', False))
             
             if not proxy_enabled:
                 return None
@@ -547,10 +589,10 @@ class CrawlerStatusDialog(QDialog):
             return {
                 'enabled': True,
                 'current_proxy': current_proxy or "等待获取",
-                'score': current_proxy_detail.get('score', 0) if current_proxy_detail else 0,
-                'response_time': current_proxy_detail.get('avg_response_time') if current_proxy_detail else None,
-                'usage_count': session.get('proxy_usage_count', 0) if isinstance(session, dict) else 0,
-                'retry_count': session.get('retry_count', 0) if isinstance(session, dict) else 0
+                'score': self._to_float(current_proxy_detail.get('score')) if current_proxy_detail else 0.0,
+                'response_time': self._to_float(current_proxy_detail.get('avg_response_time')) if current_proxy_detail else None,
+                'usage_count': self._to_int(session.get('proxy_usage_count')) if isinstance(session, dict) else 0,
+                'retry_count': self._to_int(session.get('retry_count')) if isinstance(session, dict) else 0
             }
         except Exception as e:
             logger.error(f"提取代理信息失败: {e}", exc_info=True)
@@ -609,9 +651,9 @@ class CrawlerStatusDialog(QDialog):
         """更新进度和统计信息"""
         try:
             # 获取基础统计信息
-            total = stats.get('total_pages', 0)
-            successful = stats.get('successful_pages', 0)
-            failed = stats.get('failed_pages', 0)
+            total = self._to_int(stats.get('total_pages'), 0)
+            successful = self._to_int(stats.get('successful_pages'), 0)
+            failed = self._to_int(stats.get('failed_pages'), 0)
             
             # 计算成功率
             if total > 0:
@@ -627,7 +669,7 @@ class CrawlerStatusDialog(QDialog):
             
             # 更新进度条
             if total > 0:
-                progress = (successful + failed) / total * 100
+                progress = min(max((successful + failed) / total * 100, 0), 100)
                 self.progress_bar.setValue(int(progress))
             else:
                 self.progress_bar.setValue(0)
@@ -639,10 +681,10 @@ class CrawlerStatusDialog(QDialog):
                     if not isinstance(multithread_info, dict):
                         multithread_info = {}
                     
-                    active_threads = multithread_info.get('active_threads', 0)
-                    total_crawled = multithread_info.get('total_crawled', 0)
-                    total_saved = multithread_info.get('total_saved', 0)
-                    elapsed_time = multithread_info.get('elapsed_time', 0)
+                    active_threads = self._to_int(multithread_info.get('active_threads'), 0)
+                    total_crawled = self._to_int(multithread_info.get('total_crawled'), 0)
+                    total_saved = self._to_int(multithread_info.get('total_saved'), 0)
+                    elapsed_time = self._to_float(multithread_info.get('elapsed_time'), 0.0)
                     
                     # 更新多线程信息显示（安全地）
                     if hasattr(self, 'multithread_label'):
@@ -693,62 +735,6 @@ class CrawlerStatusDialog(QDialog):
             self.failed_label.setText("")
             self.success_rate_label.setText("")
     
-    def _safe_get_status(self):
-        """安全获取爬虫状态（在爬虫运行时使用，捕获所有可能的异常）"""
-        # 默认返回值
-        default_status = {
-            'total_pages': 0,
-            'successful_pages': 0,
-            'failed_pages': 0,
-            'proxy_enabled': False,
-            'is_running': False,
-            'level': '未知',
-            'speed_mode': '正常速度'
-        }
-        
-        if not self.crawler:
-            return default_status
-        
-        # 方法1: 尝试使用 get_crawler_status 方法
-        if hasattr(self.crawler, 'get_crawler_status'):
-            try:
-                status = self.crawler.get_crawler_status()
-                if isinstance(status, dict):
-                    return status
-            except Exception as e:
-                logger.debug(f"get_crawler_status失败: {e}，尝试其他方法")
-        
-        # 方法2: 尝试使用 get_crawling_stats 方法
-        if hasattr(self.crawler, 'get_crawling_stats'):
-            try:
-                status = self.crawler.get_crawling_stats()
-                if isinstance(status, dict):
-                    return status
-            except Exception as e:
-                logger.debug(f"get_crawling_stats失败: {e}")
-        
-        # 方法3: 尝试使用 get_stats 方法
-        if hasattr(self.crawler, 'get_stats'):
-            try:
-                status = self.crawler.get_stats()
-                if isinstance(status, dict):
-                    return status
-            except Exception as e:
-                logger.debug(f"get_stats失败: {e}")
-        
-        # 方法4: 安全地直接访问属性（最不安全，但作为最后的尝试）
-        try:
-            default_status.update({
-                'proxy_enabled': getattr(self.crawler, 'enable_proxy', False),
-                'is_running': getattr(self.crawler, 'is_running', False),
-                'level': getattr(self.crawler, 'level', '未知'),
-                'speed_mode': getattr(self.crawler, 'speed_mode', '正常速度')
-            })
-        except Exception as e:
-            logger.debug(f"直接访问属性失败: {e}")
-        
-        return default_status
-    
     def stop_crawler(self):
         """停止爬虫"""
         if self.crawler:
@@ -765,11 +751,12 @@ class CrawlerStatusDialog(QDialog):
         self.is_closing = True
         
         try:
-            if hasattr(self, 'timer'):
-                self.timer.stop()
-                self.timer = None
+            if self.status_thread:
+                self.status_thread.stop()
+                self.status_thread.wait(1500)
+                self.status_thread = None
         except Exception as e:
-            logger.debug(f"停止定时器失败: {e}")
+            logger.debug(f"停止状态线程失败: {e}")
         
         try:
             # 清空爬虫引用，避免后续访问
