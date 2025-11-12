@@ -39,6 +39,7 @@ class AntiCrawlerManager:
         self._request_timestamps = deque()
         self._session_started_at = time.time()
         self._requests_since_rotation = 0
+        self._policy_success_counter = 0
 
         # 初始化配置/代理/头部
         self._load_runtime_settings()
@@ -108,6 +109,14 @@ class AntiCrawlerManager:
             rpm = 60
         self.requests_per_minute = max(1, rpm)
 
+        proxy_cfg = cfg.get_config('proxy_settings') or {}
+        try:
+            self.rotate_after_success_count = max(0, int(proxy_cfg.get('rotate_after_success_count', 0) or 0))
+        except (TypeError, ValueError):
+            self.rotate_after_success_count = 0
+        if self.rotate_after_success_count == 0:
+            self._policy_success_counter = 0
+
         try:
             self.request_timeout = int(cfg.get_config('request_timeout') or 30)
         except (TypeError, ValueError):
@@ -145,6 +154,7 @@ class AntiCrawlerManager:
     def _reset_session_counters(self) -> None:
         self._session_started_at = time.time()
         self._requests_since_rotation = 0
+        self._policy_success_counter = 0
 
     def _apply_dynamic_headers(self) -> None:
         base_headers = self._prepare_headers({}, None)
@@ -355,6 +365,23 @@ class AntiCrawlerManager:
             report_shared_proxy_result(success)
         except Exception:  # noqa: BLE001
             pass
+
+    # ------------------------------------------------------------------ #
+    # 成功策略控制
+    # ------------------------------------------------------------------ #
+    def register_policy_success(self) -> None:
+        """在成功获取政策后调用，用于按配置轮换代理"""
+        if self.rotate_after_success_count <= 0:
+            return
+        with self.lock:
+            self._policy_success_counter += 1
+            if self._policy_success_counter >= self.rotate_after_success_count:
+                self._policy_success_counter = 0
+                logger.info(
+                    "已成功获取 %s 条政策，按配置强制轮换会话/代理",
+                    self.rotate_after_success_count
+                )
+                self._maybe_rotate_session(force=True)
 
     def get_random_headers(self, url: Optional[str] = None) -> Dict:
         """向后兼容的 API，返回配置驱动的伪装请求头"""

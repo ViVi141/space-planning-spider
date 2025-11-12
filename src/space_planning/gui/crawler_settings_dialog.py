@@ -189,6 +189,20 @@ class CrawlerSettingsDialog(QDialog):
         
         rate_group.setLayout(rate_layout)
         layout.addRow(rate_group)
+
+        # 代理策略
+        proxy_group = QGroupBox("代理策略")
+        proxy_layout = QFormLayout()
+
+        self.rotate_after_success_spin = QSpinBox()
+        self.rotate_after_success_spin.setRange(0, 500)
+        self.rotate_after_success_spin.setSuffix(" 条")
+        self.rotate_after_success_spin.setToolTip("成功获取指定条数政策后强制轮换会话/代理，设置为 0 表示不启用。")
+
+        proxy_layout.addRow("成功轮换阈值:", self.rotate_after_success_spin)
+
+        proxy_group.setLayout(proxy_layout)
+        layout.addRow(proxy_group)
         
         widget.setLayout(layout)
         return widget
@@ -322,6 +336,16 @@ class CrawlerSettingsDialog(QDialog):
             rpm_value = 60
         rpm_value = max(self.requests_per_minute.minimum(), min(rpm_value, self.requests_per_minute.maximum()))
         self.requests_per_minute.setValue(rpm_value)
+
+        rotate_value = crawler_config.get_config('proxy_settings.rotate_after_success_count')
+        if rotate_value is None:
+            rotate_value = 0
+        try:
+            rotate_value = int(rotate_value)
+        except (TypeError, ValueError):
+            rotate_value = 0
+        rotate_value = max(self.rotate_after_success_spin.minimum(), min(rotate_value, self.rotate_after_success_spin.maximum()))
+        self.rotate_after_success_spin.setValue(rotate_value)
     
     def save_settings(self):
         """保存设置"""
@@ -359,6 +383,9 @@ class CrawlerSettingsDialog(QDialog):
             # 保存频率限制设置
             crawler_config.set_config('rate_limit_settings.enabled', self.enable_rate_limiting.isChecked())
             crawler_config.set_config('rate_limit_settings.max_requests_per_minute', self.requests_per_minute.value())
+
+            # 保存代理策略
+            crawler_config.set_config('proxy_settings.rotate_after_success_count', self.rotate_after_success_spin.value())
             
             # 保存到文件
             crawler_config.save_config()

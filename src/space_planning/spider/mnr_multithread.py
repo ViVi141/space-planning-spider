@@ -5,9 +5,6 @@
 """
 
 import threading
-import queue
-import time
-import random
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Callable, Any
@@ -16,7 +13,6 @@ import logging
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-import requests
 
 from .multithread_base_crawler import MultiThreadBaseCrawler
 from .monitor import CrawlerMonitor
@@ -288,6 +284,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                             continue
                         
                         policies.append(policy)
+                        self.anti_crawler.register_policy_success()
                         
                         # 发送实时数据回调（与单线程爬虫一致）
                         if callback:
@@ -374,6 +371,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                     }
                     
                     policies.append(policy)
+                    self.anti_crawler.register_policy_success()
                     
                 except Exception as e:
                     logger.error(f"解析政策项失败: {e}")
@@ -476,6 +474,7 @@ class MNRMultiThreadSpider(MultiThreadBaseCrawler):
                     }
                     
                     policies.append(policy)
+                    self.anti_crawler.register_policy_success()
                         
                 except Exception as e:
                     if callback:

@@ -1,7 +1,5 @@
 from bs4 import BeautifulSoup
 from datetime import datetime
-import time
-import random
 import json
 from urllib.parse import urljoin
 
@@ -285,6 +283,7 @@ class MNRSpider:
                     
                     filtered_policies.append(policy)
                     new_policies_count += 1
+                    self.anti_crawler.register_policy_success()
                     
                     # 调用 policy_callback 实时返回政策数据（确保 content 已填充）
                     if policy_callback:
@@ -327,8 +326,7 @@ class MNRSpider:
                 # 其他情况下如果page_policies不为空，说明有数据，重置空页计数（虽然不会到这里）
                 
                 # 控制速度
-                if not disable_speed_limit:
-                    time.sleep(random.uniform(1, 2))
+                self.anti_crawler.sleep_between_requests(disable_speed_limit)
                 
                 page += 1
                 
@@ -396,6 +394,7 @@ class MNRSpider:
                     'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 policies.append(policy)
+                self.anti_crawler.register_policy_success()
                     
         except Exception as e:
             if callback:
@@ -516,6 +515,7 @@ class MNRSpider:
                     }
                     
                     policies.append(policy)
+                    self.anti_crawler.register_policy_success()
                         
                 except Exception as e:
                     if callback:

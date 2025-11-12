@@ -366,6 +366,7 @@ CATEGORY_API_MAP = {
 - `CrawlerMonitor` 持续记录成功率与异常类型，供 GUI 状态面板与日志排查使用。
 - 速度模式（快速/正常/慢速）与随机延迟不再由单个函数硬编码，而是由配置驱动，确保单线程/多线程保持一致节奏。
 - 代理在初始化或轮换会话时自动刷新，共享代理池由管理器统一调度并回报成功率。
+- 新增可选 `rotate_after_success_count` 阈值，当成功获取指定数量政策后，强制轮换会话并刷新代理，降低封禁风险。
 
 ```202:2060:src/space_planning/spider/guangdong.py
     def get_crawler_status(self):

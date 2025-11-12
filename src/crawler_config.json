@@ -27,16 +27,17 @@
       "random_delay": true,
       "mouse_movement": true,
       "scroll_simulation": true,
-      "intensity": 10
+      "intensity": 7
     },
     "proxy_settings": {
       "enabled": false,
       "api_url": null,
-      "rotation_strategy": "quality"
+      "rotation_strategy": "quality",
+      "rotate_after_success_count": 0
     },
     "rate_limit_settings": {
       "enabled": true,
-      "max_requests_per_minute": 40
+      "max_requests_per_minute": 10
     }
   }
 }

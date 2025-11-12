@@ -56,7 +56,8 @@ class CrawlerConfig:
             'proxy_settings': {
                 'enabled': False,
                 'api_url': None,
-                'rotation_strategy': 'quality'
+                'rotation_strategy': 'quality',
+                'rotate_after_success_count': 0
             },
             'rate_limit_settings': {
                 'enabled': False,
@@ -97,7 +98,8 @@ class CrawlerConfig:
             'proxy_settings': {
                 'enabled': False,
                 'api_url': None,
-                'rotation_strategy': 'quality'
+                'rotation_strategy': 'quality',
+                'rotate_after_success_count': 0
             },
             'rate_limit_settings': {
                 'enabled': True,

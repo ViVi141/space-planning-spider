@@ -305,6 +305,7 @@ class NationalMultiThreadSpider(MultiThreadBaseCrawler):
                             }
                             
                             page_policies.append(policy)
+                            self.anti_crawler.register_policy_success()
                             
                     except Exception as e:
                         logger.error(f"线程 {thread_name} 解析政策行失败: {e}")

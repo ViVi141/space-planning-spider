@@ -1,7 +1,5 @@
 import requests
 from datetime import datetime
-import time
-import random
 import logging
 from typing import Dict, Optional
 
@@ -253,9 +251,8 @@ class NationalSpider:
                             if callback:
                                 callback(f"正在处理: {title[:30]}...")
                             
-                            # 根据速度设置决定是否添加延迟
-                            if not disable_speed_limit:
-                                time.sleep(random.uniform(0.5, 2.0))
+                            # 根据统一配置控制请求节奏
+                            self.anti_crawler.sleep_between_requests(disable_speed_limit)
                             content = self.get_policy_detail(url, stop_callback)
                             policy_data = {
                                 'level': '住房和城乡建设部',
@@ -270,6 +267,7 @@ class NationalSpider:
                                 'crawl_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
                             page_policies.append(policy_data)
+                            self.anti_crawler.register_policy_success()
                             
                             # 调用 policy_callback 实时返回政策数据
                             if policy_callback:
