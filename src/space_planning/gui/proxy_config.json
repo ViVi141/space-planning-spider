@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "max_proxies": 10,
   "check_interval": 300,
   "username": "",

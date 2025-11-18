@@ -653,21 +653,29 @@ class GuangdongSpider(EnhancedBaseCrawler):
         
         while retry_count < max_retries:
             try:
-                # 1. 先请求翻页校验接口 (如果 api_config 提供)
-                if api_config:
+                # 1. 先请求翻页校验接口 (从第2页开始，如果 api_config 提供)
+                # 注意：翻页校验接口需要正确的OldPageIndex和newPageIndex参数
+                if api_config and page_index > 1 and old_page_index is not None:
                     check_url = f"{self.base_url}/VerificationCode/GetRecordListTurningLimit"
                     check_headers = self.headers.copy()
                     check_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                     
-                    logger.debug(f"请求翻页校验接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
+                    # 构建翻页校验参数（需要包含OldPageIndex和newPageIndex）
+                    check_params = search_params.copy()
+                    check_params['OldPageIndex'] = str(old_page_index)
+                    check_params['newPageIndex'] = str(page_index)
+                    
+                    logger.debug(f"请求翻页校验接口: 第{page_index}页 (上一页={old_page_index}, 重试{retry_count + 1}/{max_retries})")
                     check_resp, check_info = self._session_post(
                         check_url,
-                        data=search_params,
+                        data=check_params,
                         headers=check_headers,
                         timeout=15
                     )
                     if not check_resp or check_resp.status_code != 200:
                         logger.warning(f"翻页校验失败: {check_info.get('status_code', 'No response')}")
+                    else:
+                        logger.debug(f"翻页校验成功: 第{page_index}页")
                 
                 # 2. 再请求数据接口
                 if api_config:
@@ -678,9 +686,14 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 search_headers = self.headers.copy()
                 search_headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
                 
-                # 更新搜索参数中的OldPageIndex
+                # 更新搜索参数中的OldPageIndex和newPageIndex（确保正确设置）
                 if old_page_index is not None:
                     search_params['OldPageIndex'] = str(old_page_index)
+                    search_params['newPageIndex'] = str(page_index)
+                else:
+                    # 第一页不需要OldPageIndex
+                    search_params['OldPageIndex'] = ''
+                    search_params['newPageIndex'] = ''
                 
                 logger.debug(f"请求数据接口: 第{page_index}页 (重试{retry_count + 1}/{max_retries})")
                 
@@ -775,12 +788,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
             return 0
     
     def _parse_policy_list_html(self, html_content, callback=None, stop_callback=None, category_name=None, policy_callback=None):
-        """解析HTML响应中的政策列表 - 只使用 checkbox 方法"""
+        """解析HTML响应中的政策列表 - 优先使用 checkbox 方法，失败时使用备用方法"""
         try:
             soup = BeautifulSoup(html_content, 'html.parser')
             policies = []
 
-            # 只使用 checkbox 方法提取政策 ID
+            # 方法1：优先使用 checkbox 方法提取政策 ID
             checkboxes = soup.select('input.checkbox[name="recordList"]')
             checkbox_policies = []
             if checkboxes:
@@ -810,12 +823,44 @@ class GuangdongSpider(EnhancedBaseCrawler):
                         }
                         # 计算 checksum (基于临时数据)
                         policy_data['checksum'] = self._generate_policy_hash(policy_data)
-                        logger.info(f"生成 checkbox 政策 checksum: {policy_data['checksum'][:8]}...")
+                        logger.debug(f"生成 checkbox 政策 checksum: {policy_data['checksum'][:8]}...")
 
                         checkbox_policies.append(policy_data)
 
+            # 方法2：如果 checkbox 方法失败，使用备用解析方法（list-title等）
             if not checkbox_policies:
-                logger.warning("无 checkbox 政策，使用 checkbox 方法失败，返回空列表")
+                logger.debug("checkbox 方法未找到政策，尝试使用备用解析方法...")
+                try:
+                    # 使用 _parse_policy_list_record_search 作为备用方法
+                    backup_policies = self._parse_policy_list_record_search(
+                        soup, callback=callback, stop_callback=stop_callback, category_name=category_name
+                    )
+                    if backup_policies:
+                        logger.info(f"备用解析方法成功，找到 {len(backup_policies)} 条政策")
+                        # 将备用方法解析的政策转换为标准格式
+                        for policy in backup_policies:
+                            # 如果政策没有 policy_id，尝试从 URL 中提取
+                            if not policy.get('policy_id') and policy.get('url'):
+                                url = policy.get('url', '')
+                                # 尝试从 URL 中提取 policy_id（格式：/library/policy_id.html）
+                                import re
+                                match = re.search(r'/([^/]+)\.html$', url)
+                                if match:
+                                    policy['policy_id'] = match.group(1)
+                                    policy['_need_detail_fetch'] = True
+                            
+                            # 如果没有 checksum，生成一个
+                            if not policy.get('checksum'):
+                                policy['checksum'] = self._generate_policy_hash(policy)
+                        
+                        checkbox_policies = backup_policies
+                    else:
+                        logger.warning("备用解析方法也未找到政策，返回空列表")
+                except Exception as e:
+                    logger.warning(f"备用解析方法失败: {e}", exc_info=True)
+            
+            if not checkbox_policies:
+                logger.warning("所有解析方法都失败，返回空列表")
                 return []
 
             policies = checkbox_policies
@@ -826,10 +871,22 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 logger.info("用户已停止解析")
                 return policies
 
-            # 批量获取详情 (保持原有)
+            # 批量获取详情并筛选地区
             policies_needing_detail = [p for p in policies if p.get('_need_detail_fetch')]
             if policies_needing_detail:
                 logger.info(f"批量获取 {len(policies_needing_detail)} 条政策的详情内容...")
+                filtered_policies = []
+                
+                # 获取分类代码（用于辅助判断）
+                category_code = None
+                if category_name:
+                    # 从分类名称获取分类代码
+                    flat_categories = self._get_flat_categories()
+                    for cat_name, cat_code in flat_categories:
+                        if cat_name == category_name:
+                            category_code = cat_code
+                            break
+                
                 for policy in policies_needing_detail:
                     if stop_callback and stop_callback():
                         break
@@ -852,8 +909,10 @@ class GuangdongSpider(EnhancedBaseCrawler):
                                 doc_number = detail_data.get('doc_number')
                                 pub_date = detail_data.get('pub_date')
                                 validity = detail_data.get('validity')
+                                issue_department = detail_data.get('issue_department', '')  # 发布机关
                             else:
                                 content = detail_data
+                                issue_department = ''
 
                             if real_title:
                                 policy['title'] = real_title
@@ -863,6 +922,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
                                 policy['pub_date'] = pub_date
                             if validity:
                                 policy['validity'] = validity
+                            if issue_department:
+                                policy['issue_department'] = issue_department
 
                             if content and len(content) > 50:
                                 policy['content'] = content
@@ -876,10 +937,40 @@ class GuangdongSpider(EnhancedBaseCrawler):
                                 logger.warning(f"详情内容为空或过短: {len(content) if content else 0}")
 
                             policy.pop('_need_detail_fetch', None)
+                            
+                            # 地区筛选：只保留省级和中山市政策（作用于全省或全市）
+                            if self._should_keep_policy(policy, category_code):
+                                filtered_policies.append(policy)
+                                # 记录详细信息
+                                region = self._identify_policy_region(policy)
+                                scope = self._identify_scope(policy)
+                                level = self._identify_level(policy)
+                                logger.debug(
+                                    f"保留政策: {policy.get('title', '')[:50]} | "
+                                    f"地区: {region} | 作用范围: {scope} | 层级: {level}"
+                                )
+                            else:
+                                region = self._identify_policy_region(policy)
+                                scope = self._identify_scope(policy)
+                                validity = policy.get('validity', '')
+                                logger.info(
+                                    f"已过滤政策: {policy.get('title', '')[:50]} | "
+                                    f"地区: {region} | 作用范围: {scope} | 时效性: {validity}"
+                                )
 
                         except Exception as e:
                             logger.warning(f"获取政策详情失败: {url}, 错误: {e}")
                             policy.pop('_need_detail_fetch', None)
+                            # 获取失败的政策，默认保留（避免误删）
+                            filtered_policies.append(policy)
+                
+                # 使用筛选后的政策列表
+                policies = filtered_policies
+                filtered_count = len(policies_needing_detail) - len(policies)
+                logger.info(
+                    f"筛选完成 - 保留: {len(policies)} 条（省级全省适用 + 中山市全市适用），"
+                    f"已过滤: {filtered_count} 条（其他城市/特定区域/已废止）"
+                )
 
             # 发送解析完成信号 (保持原有)
             if policy_callback:
@@ -1086,14 +1177,166 @@ class GuangdongSpider(EnhancedBaseCrawler):
         return categories
     
     def _get_flat_categories(self):
-        """获取扁平化的分类列表（兼容旧版本）"""
-        flat_categories = []
-        for parent_name, parent_code, sub_categories in self._get_all_categories():
-            for sub_name, sub_code in sub_categories:
-                flat_categories.append((sub_name, sub_code))
+        """
+        获取扁平化的分类列表（用于中山市特化法规知识库）
+        只返回需要的分类，不包含自治条例和单行条例
+        """
+        flat_categories = [
+            # 地方性法规
+            ("省级地方性法规", "XM0701"),  # 获取全部 (859)
+            ("设区的市地方性法规", "XM0702"),  # 只获取中山市人大 (8)
+            
+            # 地方政府规章
+            ("省级地方政府规章", "XO0802"),  # 获取广东省人民政府 (764)
+            ("设区的市地方政府规章", "XO0803"),  # 获取中山市人民政府 (21)
+            
+            # 规范性文件
+            ("地方规范性文件", "XP08"),  # 获取中山市人大、政府、其他机构 (9+640+292)
+            
+            # 不包含：经济特区法规 (XM0703)、自治条例和单行条例 (XU13)
+        ]
         return flat_categories
     
-    def _get_search_parameters(self, keywords=None, category_code=None, page_index=1, page_size=20, start_date=None, end_date=None, old_page_index=None, filter_year=None, api_config=None):
+    def _generate_filter_keywords(self, use_keyword_search=True):
+        """
+        生成用于筛选的关键词组合（用于中山市特化法规知识库）
+        
+        Args:
+            use_keyword_search: 是否使用关键词检索（True：使用关键词直接检索，False：爬取后筛选）
+        
+        Returns:
+            List[str]: 关键词列表，用于直接检索省级和中山市政策
+        """
+        if not use_keyword_search:
+            return None
+        
+        # 省级政策关键词（用于检索全省适用的政策）
+        provincial_keywords = [
+            '广东省',  # 最通用的省级关键词
+            # 注意：不包含"粤府"等文号，因为文号在标题中可能不完整
+        ]
+        
+        # 中山市政策关键词
+        zhongshan_keywords = [
+            '中山市',  # 最通用的中山市关键词
+            # 注意：不包含"中府"等文号，因为文号在标题中可能不完整
+        ]
+        
+        # 组合关键词：使用OR逻辑（任何一个匹配即可）
+        # 注意：由于网站搜索可能不支持OR逻辑，我们需要分别搜索
+        # 这里返回一个组合关键词列表，实际使用时可能需要分别搜索
+        
+        # 返回组合关键词（如果网站支持OR搜索）
+        # 如果不支持，需要在调用方分别搜索
+        return provincial_keywords + zhongshan_keywords
+    
+    def _get_issue_department_lvalues(self, category_code: str):
+        """
+        根据分类代码获取发布机关的lvalue值列表（用于高级搜索）
+        按照中山市特化法规知识库需求精确配置
+        注意：规范性文件(XP08)包含省级和中山市相关机构
+        
+        Args:
+            category_code: 分类代码
+        
+        Returns:
+            List[str]: 发布机关lvalue值列表，空列表表示不使用发布机关筛选
+        """
+        # 省级地方性法规 (XM0701)：获取全部省级机构
+        # 注意：测试显示81903在dfxfg菜单中无数据，需要使用81901（广东省人大）
+        # 或者可能需要分别获取多个发布机关
+        if category_code == 'XM0701':
+            # 先尝试使用81901（广东省人大），如果不够再考虑其他方式
+            return ['81901']  # 广东省人大(含常委会)
+        
+        # 设区的市地方性法规 (XM0702)：只获取中山市人大
+        # 注意：测试显示81937在dfxfg菜单中无效，需要不使用发布机关筛选
+        # 改为获取所有XM0702数据，在后续筛选阶段过滤出中山市的
+        if category_code == 'XM0702':
+            # 不使用发布机关筛选，获取所有设区的市地方性法规，后续筛选出中山市的
+            return []  # 返回空列表表示不使用发布机关筛选
+        
+        # 省级地方政府规章 (XO0802)：只获取广东省人民政府
+        if category_code == 'XO0802':
+            return ['81902']  # 广东省人民政府 (764条)
+        
+        # 设区的市地方政府规章 (XO0803)：只获取中山市人民政府
+        if category_code == 'XO0803':
+            return ['81938']  # 中山市人民政府 (21条)
+        
+        # 规范性文件 (XP08)：获取省级和中山市相关机构
+        # 注意：测试显示81937在XP08分类中无效（即使使用ClassCodeKey=XP08）
+        # 虽然之前保存的HTML显示有9条数据，但当前测试无法获取
+        # 如果确实需要81937的数据，可以考虑不使用发布机关筛选，后续筛选出中山市人大的政策
+        if category_code == 'XP08':
+            return [
+                # 省级机构
+                '81901',  # 广东省人大(含常委会) (40条)
+                '81902',  # 广东省人民政府 (1923条)
+                '81903',  # 广东省其他机构 (8740条)
+                # 中山市机构
+                # '81937',  # 中山市人大(含常委会) - 当前测试显示无效，暂不使用
+                '81938',  # 中山市人民政府 (640条)
+                '81939',  # 中山市其他机构 (292条)
+            ]
+        
+        # 其他分类：不使用发布机关筛选
+        return []
+    
+    def _get_issue_department_lvalue(self, category_code: str):
+        """
+        根据分类代码获取发布机关的lvalue值（用于高级搜索）
+        注意：对于需要多个发布机关的分类（如XP08），返回None，需要分别处理
+        
+        Args:
+            category_code: 分类代码
+        
+        Returns:
+            str: 发布机关lvalue值，None表示需要分别处理多个发布机关
+        """
+        lvalues = self._get_issue_department_lvalues(category_code)
+        if not lvalues:
+            return None
+        
+        # 如果只有一个lvalue，直接返回
+        if len(lvalues) == 1:
+            return lvalues[0]
+        
+        # 如果有多个lvalue（如规范性文件），返回None，需要分别处理
+        return None
+    
+    def _get_search_keywords_for_category(self, category_code: str, use_keyword_search=True):
+        """
+        根据分类代码获取搜索关键词（用于中山市特化法规知识库）
+        
+        注意：如果已有发布机关筛选，则不需要关键词检索（发布机关筛选更精确）
+        
+        Args:
+            category_code: 分类代码
+            use_keyword_search: 是否使用关键词检索
+        
+        Returns:
+            List[str]: 关键词列表，None表示不使用关键词检索
+        """
+        if not use_keyword_search:
+            return None
+        
+        # 检查是否有发布机关筛选
+        issue_department_lvalue = self._get_issue_department_lvalue(category_code)
+        if issue_department_lvalue:
+            # 有发布机关筛选，不需要关键词检索（发布机关筛选更精确）
+            logger.debug(f"分类 {category_code} 已有发布机关筛选（lvalue={issue_department_lvalue}），跳过关键词检索")
+            return None
+        
+        # 无发布机关筛选的分类，考虑使用关键词检索
+        # 规范性文件：需要分别处理省级和市级，不使用关键词检索（在后续筛选阶段处理）
+        if category_code == 'XP08':
+            return None
+        
+        # 其他分类（经济特区法规、自治条例等）：不使用关键词检索，将在后续筛选阶段处理
+        return None
+    
+    def _get_search_parameters(self, keywords=None, category_code=None, page_index=1, page_size=20, start_date=None, end_date=None, old_page_index=None, filter_year=None, api_config=None, issue_department_lvalue=None):
         """获取搜索参数 - 支持动态API配置（从测试脚本迁移优化版）
         
         Args:
@@ -1106,6 +1349,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             old_page_index: 上一页页码
             filter_year: 年份筛选（如果指定，将通过ClassCodeKey传递年份实现）
             api_config: API配置（包含menu, library, class_flag等），如果不提供则根据category_code自动获取
+            issue_department_lvalue: 发布机关lvalue值（如果提供，将优先使用，否则根据category_code自动获取）
         """
         # 如果没有提供api_config，根据分类代码获取
         if api_config is None:
@@ -1126,12 +1370,18 @@ class GuangdongSpider(EnhancedBaseCrawler):
         #     page_size = 100  # fljs接口使用更大的页大小
         #     logger.debug(f"fljs接口检测到，调整页大小为 {page_size}")
         
+        # 获取发布机关lvalue（优先使用传入的值，否则根据category_code自动获取）
+        if issue_department_lvalue is None and category_code:
+            issue_department_lvalue = self._get_issue_department_lvalue(category_code)
+            if issue_department_lvalue:
+                logger.debug(f"自动获取发布机关筛选: category_code={category_code}, lvalue={issue_department_lvalue}")
+        
         # 基于网站表单分析，使用正确的参数名称
         search_params = {
             'Menu': api_config['menu'],  # 根据分类类型动态选择菜单
-            'Keywords': keywords[0] if keywords and len(keywords) > 0 else '',
-            'SearchKeywordType': 'Title',
-            'MatchType': 'Exact',
+            'Keywords': ' '.join(keywords) if keywords and len(keywords) > 0 else '',  # 支持多个关键词
+            'SearchKeywordType': 'Title',  # 标题搜索
+            'MatchType': 'Fuzzy',  # 模糊匹配（更灵活，能匹配包含关键词的标题）
             'RangeType': 'Piece',
             'Library': api_config['library'],  # 根据分类类型动态选择库
             'ClassFlag': api_config['class_flag'],
@@ -1141,8 +1391,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
             'pdfStr': '',
             'pdfTitle': '',
             'IsAdv': 'True',
-            # 修复：同时支持分类代码和年份筛选
-            # 格式：,,,XP08,,,2023 表示筛选XP08分类的2023年数据
+            # 注意：测试显示，当使用 AdvSearchDic.IssueDepartment 时，仍然需要同时设置 ClassCodeKey
+            # 两者可以同时使用，ClassCodeKey限制分类，IssueDepartment限制发布机关
             'ClassCodeKey': (
                 f',,,{category_code},,,{filter_year}' if filter_year and category_code
                 else f',,,{filter_year}' if filter_year
@@ -1155,7 +1405,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
             'GroupValue': '',  # 不使用GroupValue（改用ClassCodeKey传递年份筛选）
             'AdvSearchDic.Title': '',
             'AdvSearchDic.CheckFullText': '',
-            'AdvSearchDic.IssueDepartment': '',
+            'AdvSearchDic.IssueDepartment': issue_department_lvalue or '',  # 使用发布机关lvalue直接筛选
             'AdvSearchDic.DocumentNO': '',
             'AdvSearchDic.IssueDate': start_date or '',  # 保留日期筛选作为备用
             'AdvSearchDic.ImplementDate': end_date or '',  # 保留日期筛选作为备用
@@ -1180,6 +1430,374 @@ class GuangdongSpider(EnhancedBaseCrawler):
             search_params['FullTextKeywords'] = ' '.join(keywords)
         
         return search_params
+    
+    def _identify_region_by_department(self, issue_department: str) -> str:
+        """
+        基于发布机关识别地区
+        
+        Returns:
+            'provincial': 省级
+            'zhongshan': 中山市
+            'other': 其他城市
+            'unknown': 无法识别
+        """
+        if not issue_department:
+            return 'unknown'
+        
+        # 省级识别
+        if '广东省人民政府' in issue_department:
+            return 'provincial'
+        if '广东省' in issue_department and ('人大' in issue_department or '人大常委会' in issue_department):
+            return 'provincial'
+        if '广东省' in issue_department and '政协' in issue_department:
+            return 'provincial'
+        
+        # 中山市识别
+        if '中山市人民政府' in issue_department:
+            return 'zhongshan'
+        if '中山市' in issue_department and ('人大' in issue_department or '人大常委会' in issue_department):
+            return 'zhongshan'
+        if '中山市' in issue_department and '政协' in issue_department:
+            return 'zhongshan'
+        
+        # 其他城市识别（排除）
+        exclude_cities = [
+            '广州市', '深圳市', '珠海市', '汕头市', '佛山市',
+            '韶关市', '湛江市', '肇庆市', '江门市', '茂名市',
+            '惠州市', '梅州市', '汕尾市', '河源市', '阳江市',
+            '清远市', '东莞市', '潮州市', '揭阳市', '云浮市'
+        ]
+        for city in exclude_cities:
+            if city in issue_department:
+                return 'other'
+        
+        return 'unknown'
+    
+    def _identify_region_by_doc_number(self, doc_number: str) -> str:
+        """
+        基于文号识别地区
+        
+        Returns:
+            'provincial': 省级
+            'zhongshan': 中山市
+            'other': 其他城市
+            'unknown': 无法识别
+        """
+        if not doc_number:
+            return 'unknown'
+        
+        # 省级文号模式
+        provincial_patterns = [
+            r'^粤府[（\(]?\d{4}[）\)]?',  # 粤府[2024]1号
+            r'^粤府办[（\(]?\d{4}[）\)]?',  # 粤府办[2024]1号
+            r'^粤[A-Z]{0,3}[（\(]?\d{4}[）\)]?',  # 粤XX[2024]1号
+            r'^广东省',  # 广东省XX号
+        ]
+        for pattern in provincial_patterns:
+            if re.search(pattern, doc_number):
+                return 'provincial'
+        
+        # 中山市文号模式
+        zhongshan_patterns = [
+            r'^中府[（\(]?\d{4}[）\)]?',  # 中府[2024]1号
+            r'^中府办[（\(]?\d{4}[）\)]?',  # 中府办[2024]1号
+            r'^中山市',  # 中山市XX号
+            r'^中[A-Z]{0,3}[（\(]?\d{4}[）\)]?',  # 中XX[2024]1号
+        ]
+        for pattern in zhongshan_patterns:
+            if re.search(pattern, doc_number):
+                return 'zhongshan'
+        
+        # 其他城市文号模式（排除）
+        exclude_patterns = [
+            r'^穗府', r'^深府', r'^珠府', r'^汕府', r'^佛府',
+            r'^韶府', r'^湛府', r'^肇府', r'^江府', r'^茂府',
+            r'^惠府', r'^梅府', r'^河府', r'^阳府', r'^清府',
+            r'^东府', r'^潮府', r'^揭府', r'^云府'
+        ]
+        for pattern in exclude_patterns:
+            if re.search(pattern, doc_number):
+                return 'other'
+        
+        return 'unknown'
+    
+    def _identify_region_by_title(self, title: str) -> str:
+        """
+        基于标题识别地区（辅助方法，准确性较低）
+        """
+        if not title:
+            return 'unknown'
+        
+        # 省级标题模式
+        if title.startswith('广东省'):
+            # 需要进一步检查，因为可能是"广东省XX市XX条例"
+            if '市' in title and not title.startswith('广东省人民政府'):
+                # 可能是市级政策，需要结合其他字段判断
+                return 'unknown'
+            return 'provincial'
+        
+        # 中山市标题模式
+        if title.startswith('中山市'):
+            return 'zhongshan'
+        
+        # 其他城市标题模式（排除）
+        exclude_cities = [
+            '广州市', '深圳市', '珠海市', '汕头市', '佛山市',
+            '韶关市', '湛江市', '肇庆市', '江门市', '茂名市',
+            '惠州市', '梅州市', '汕尾市', '河源市', '阳江市',
+            '清远市', '东莞市', '潮州市', '揭阳市', '云浮市'
+        ]
+        for city in exclude_cities:
+            if title.startswith(city):
+                return 'other'
+        
+        return 'unknown'
+    
+    def _identify_policy_region(self, policy: Dict) -> str:
+        """
+        综合识别政策所属地区
+        
+        优先级：
+        1. 发布机关（最准确）
+        2. 文号（次准确）
+        3. 标题（辅助）
+        
+        Returns:
+            'provincial': 省级政策
+            'zhongshan': 中山市政策
+            'other': 其他地区政策（需排除）
+            'unknown': 无法识别（默认保留，避免误删）
+        """
+        issue_department = policy.get('issue_department', '')
+        doc_number = policy.get('doc_number', '')
+        title = policy.get('title', '')
+        
+        # 优先级1: 发布机关
+        region = self._identify_region_by_department(issue_department)
+        if region != 'unknown':
+            return region
+        
+        # 优先级2: 文号
+        region = self._identify_region_by_doc_number(doc_number)
+        if region != 'unknown':
+            return region
+        
+        # 优先级3: 标题
+        region = self._identify_region_by_title(title)
+        if region != 'unknown':
+            return region
+        
+        return 'unknown'  # 返回unknown，由调用方决定是否保留
+    
+    def _identify_scope(self, policy: Dict) -> str:
+        """
+        识别政策作用范围
+        
+        Returns:
+            'province_wide': 全省适用
+            'city_wide': 全市适用（中山市）
+            'both': 同时适用于全省和全市
+            'specific': 特定区域（需要排除）
+            'unknown': 无法识别
+        """
+        content = policy.get('content', '')
+        title = policy.get('title', '')
+        
+        # 只检查前2000字符，提高效率
+        content_preview = content[:2000] if content else ''
+        text_to_check = f"{title} {content_preview}"
+        
+        # 检查是否包含全省关键词
+        province_keywords = [
+            '全省', '本省行政区域', '全省范围内', '全省各地', '全省各市', 
+            '全省统一', '全省通办', '全省建立', '本省', '全省范围内'
+        ]
+        has_province_scope = any(keyword in text_to_check for keyword in province_keywords)
+        
+        # 检查是否包含全市关键词（中山市）
+        city_keywords = [
+            '全市', '本市行政区域', '全市范围内', '全市各地', 
+            '全市统一', '全市通办', '全市建立', '本市', '全市范围内'
+        ]
+        has_city_scope = any(keyword in text_to_check for keyword in city_keywords)
+        
+        # 判断作用范围
+        if has_province_scope and has_city_scope:
+            return 'both'
+        elif has_province_scope:
+            return 'province_wide'
+        elif has_city_scope:
+            return 'city_wide'
+        else:
+            # 检查是否特定区域（需要更精确的判断）
+            # 这里暂时返回unknown，由调用方根据其他信息判断
+            return 'unknown'
+    
+    def _check_validity(self, policy: Dict) -> bool:
+        """
+        检查政策是否有效（时效性过滤）
+        
+        Returns:
+            True: 有效（保留）
+            False: 已废止/失效（排除）
+        """
+        validity = policy.get('validity', '')
+        
+        if not validity:
+            # 如果没有时效性信息，默认保留（保守处理）
+            return True
+        
+        # 已废止/失效关键词
+        invalid_keywords = ['已废止', '已失效', '废止', '失效', '不再执行', '已停止执行']
+        if any(keyword in validity for keyword in invalid_keywords):
+            logger.debug(f"政策已废止/失效，排除: {policy.get('title', '')[:50]}, 时效性: {validity}")
+            return False
+        
+        # 有效关键词
+        valid_keywords = ['现行有效', '有效', '正在执行', '执行中']
+        if any(keyword in validity for keyword in valid_keywords):
+            return True
+        
+        # 默认保留（保守处理）
+        return True
+    
+    def _identify_level(self, policy: Dict) -> str:
+        """
+        识别政策层级
+        
+        Returns:
+            'national': 国家层级
+            'provincial': 省级层级
+            'city': 市级层级（中山市）
+            'unknown': 无法识别
+        """
+        issue_department = policy.get('issue_department', '')
+        doc_number = policy.get('doc_number', '')
+        
+        # 国家层级
+        if '国务院' in issue_department or '全国人大' in issue_department or '全国人大常委会' in issue_department:
+            return 'national'
+        if doc_number and (doc_number.startswith('国') or doc_number.startswith('中华人民共和国')):
+            return 'national'
+        
+        # 省级层级
+        if '广东省' in issue_department and ('人民政府' in issue_department or '人大' in issue_department):
+            return 'provincial'
+        if doc_number and doc_number.startswith('粤'):
+            return 'provincial'
+        
+        # 市级层级（中山市）
+        if '中山市' in issue_department:
+            return 'city'
+        if doc_number and doc_number.startswith('中'):
+            return 'city'
+        
+        return 'unknown'
+    
+    def _should_keep_policy(self, policy: Dict, category_code: str = None) -> bool:
+        """
+        判断是否应该保留该政策（用于中山市特化法规知识库）
+        
+        保留条件：
+        1. 地区：省级 OR 中山市
+        2. 作用范围：全省适用 OR 全市适用（中山市）OR 两者都适用
+        3. 时效性：现行有效
+        4. 层级：国家 OR 省级 OR 市级（中山市）
+        
+        Args:
+            policy: 政策字典
+            category_code: 分类代码（用于辅助判断）
+        
+        Returns:
+            True: 保留
+            False: 排除
+        """
+        # 1. 地区识别（省级或中山市）
+        region = self._identify_policy_region(policy)
+        if region == 'other':
+            logger.debug(f"排除其他城市政策: {policy.get('title', '')[:50]}")
+            return False  # 排除其他城市政策
+        
+        # 2. 时效性检查（优先检查，避免处理无效政策）
+        if not self._check_validity(policy):
+            return False  # 排除已废止/失效政策
+        
+        # 3. 作用范围识别
+        scope = self._identify_scope(policy)
+        
+        # 4. 层级识别（用于日志记录，但不影响筛选结果）
+        # level = self._identify_level(policy)  # 暂时注释，避免未使用变量警告
+        
+        # 5. 综合判断
+        # 省级政策：需要全省适用
+        if region == 'provincial':
+            if scope in ['province_wide', 'both', 'unknown']:
+                # unknown时，省级政策默认视为全省适用
+                logger.debug(f"保留省级政策（全省适用）: {policy.get('title', '')[:50]}")
+                return True
+            else:
+                logger.debug(f"省级政策但作用范围不是全省，排除: {policy.get('title', '')[:50]}, 作用范围: {scope}")
+                return False
+        
+        # 中山市政策：需要全市适用
+        elif region == 'zhongshan':
+            if scope in ['city_wide', 'both', 'unknown']:
+                # unknown时，中山市政策默认视为全市适用
+                logger.debug(f"保留中山市政策（全市适用）: {policy.get('title', '')[:50]}")
+                return True
+            else:
+                logger.debug(f"中山市政策但作用范围不是全市，排除: {policy.get('title', '')[:50]}, 作用范围: {scope}")
+                return False
+        
+        # 无法识别地区时，根据分类判断
+        else:
+            if category_code in ['XM0701', 'XO0802']:
+                # 省级分类，默认保留（视为全省适用）
+                logger.warning(f"无法识别地区，但属于省级分类，默认保留: {policy.get('title', '')[:50]}")
+                return True
+            else:
+                # 其他情况，保守处理：保留（避免误删）
+                logger.warning(f"无法识别地区，默认保留: {policy.get('title', '')[:50]}")
+                return True
+    
+    def _are_pages_identical(self, page1_policies: List[Dict], page2_policies: List[Dict]) -> bool:
+        """
+        检查两页政策数据是否完全一致
+        
+        Args:
+            page1_policies: 第一页的政策列表
+            page2_policies: 第二页的政策列表
+        
+        Returns:
+            True: 完全一致
+            False: 不一致
+        """
+        # 如果数量不同，肯定不一致
+        if len(page1_policies) != len(page2_policies):
+            return False
+        
+        # 如果都为空，视为一致
+        if len(page1_policies) == 0:
+            return True
+        
+        # 比较每条政策的唯一标识（使用title和doc_number的组合）
+        # 如果所有政策的标识都相同，则认为两页完全一致
+        page1_identifiers = set()
+        for policy in page1_policies:
+            title = policy.get('title', '').strip()
+            doc_number = policy.get('doc_number', '').strip()
+            identifier = f"{title}|{doc_number}"
+            page1_identifiers.add(identifier)
+        
+        page2_identifiers = set()
+        for policy in page2_policies:
+            title = policy.get('title', '').strip()
+            doc_number = policy.get('doc_number', '').strip()
+            identifier = f"{title}|{doc_number}"
+            page2_identifiers.add(identifier)
+        
+        # 如果两个集合完全相同，则认为两页完全一致
+        return page1_identifiers == page2_identifiers
     
     def _generate_policy_hash(self, policy):
         """生成政策 checksum (优先 content MD5，用于唯一标识)"""
@@ -1265,8 +1883,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
         """
         logger.info(f"开始爬取广东省政策，关键词: {keywords}")
 
-        # 每次爬取前刷新年份统计，避免使用过期数据
-        self._refresh_category_year_counts()
+        # 注意：已取消年份分割策略，不再需要刷新年份统计
+        # self._refresh_category_year_counts()  # 已废弃，不再使用年份分割策略
 
         # 解析时间范围（目前未使用，预留功能）
         if start_date and end_date:
@@ -1284,31 +1902,76 @@ class GuangdongSpider(EnhancedBaseCrawler):
         all_policies = []
         total_crawled = 0
 
-        # 遍历所有分类进行年份分割爬取
-        logger.info("开始年份分割分类爬取...")
+        # 遍历所有分类，直接按分类代码和发布机关获取（取消年份分割策略）
+        logger.info("开始按分类代码和发布机关直接获取...")
         if callback:
-            callback("开始年份分割分类爬取...")
+            callback("开始按分类代码和发布机关直接获取...")
 
         for category_name, category_code in categories:
             if stop_callback and stop_callback():
                 logger.info("用户已停止爬取")
                 break
 
-            logger.info(f"正在使用年份分割策略爬取分类: {category_name} (代码: {category_code})")
+            logger.info(f"正在爬取分类: {category_name} (代码: {category_code})")
             if callback:
-                callback(f"正在使用年份分割策略爬取分类: {category_name}")
+                callback(f"正在爬取分类: {category_name}")
 
-            category_policies = self._crawl_category_with_year_split(
-                category_name,
-                category_code,
-                callback,
-                stop_callback,
-                policy_callback,
-                keywords=keywords,
-                start_date=start_date,
-                end_date=end_date,
-                disable_speed_limit=disable_speed_limit
-            )
+            # 获取该分类需要的发布机关列表
+            issue_department_lvalues = self._get_issue_department_lvalues(category_code)
+            
+            if not issue_department_lvalues:
+                # 对于不使用发布机关筛选的分类（如XM0702），使用空lvalue获取所有数据，后续筛选
+                logger.info(f"分类 {category_name} 不使用发布机关筛选，获取所有数据后筛选")
+                dept_policies = self._crawl_category_by_department(
+                    category_name,
+                    category_code,
+                    '',  # 空字符串表示不使用发布机关筛选
+                    callback,
+                    stop_callback,
+                    policy_callback,
+                    keywords=keywords,
+                    start_date=start_date,
+                    end_date=end_date,
+                    disable_speed_limit=disable_speed_limit
+                )
+                
+                if dept_policies:
+                    category_policies = dept_policies
+                    total_crawled += len(category_policies)
+                    all_policies.extend(category_policies)
+                    logger.info(f"分类[{category_name}] 完成，获取 {len(category_policies)} 条政策")
+                else:
+                    logger.warning(f"分类[{category_name}] 未获取到政策数据")
+                continue
+            
+            # 对于需要多个发布机关的分类（如规范性文件），分别获取
+            category_policies = []
+            for lvalue in issue_department_lvalues:
+                # 获取发布机关名称（用于日志）
+                dept_name = self._get_department_name_by_lvalue(lvalue)
+                logger.info(f"  获取发布机关: {dept_name} (lvalue={lvalue})")
+                if callback:
+                    callback(f"  获取发布机关: {dept_name}")
+                
+                # 直接按分类和发布机关获取（不使用年份分割）
+                dept_policies = self._crawl_category_by_department(
+                    category_name,
+                    category_code,
+                    lvalue,
+                    callback,
+                    stop_callback,
+                    policy_callback,
+                    keywords=keywords,
+                    start_date=start_date,
+                    end_date=end_date,
+                    disable_speed_limit=disable_speed_limit
+                )
+                
+                if dept_policies:
+                    category_policies.extend(dept_policies)
+                    logger.info(f"  发布机关 {dept_name} 获取到 {len(dept_policies)} 条政策")
+                else:
+                    logger.warning(f"  发布机关 {dept_name} 未获取到政策数据")
 
             if category_policies:
                 total_crawled += len(category_policies)
@@ -2109,7 +2772,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
                 doc_number = ''
                 pub_date = ''
                 validity = ''
-    
+                issue_department = ''  # 发布机关（用于地区识别）
+                
                 for li in soup.select('li'):
                     strong = li.find('strong')
                     if not strong:
@@ -2122,6 +2786,8 @@ class GuangdongSpider(EnhancedBaseCrawler):
                         pub_date = value.replace('.', '-')
                     elif '施行日期' in label and value and not pub_date:
                         pub_date = value.replace('.', '-')
+                    elif ('发布机关' in label or '制定机关' in label) and value:
+                        issue_department = value
     
                 validity_elem = soup.select_one('.timelinessDic')
                 if validity_elem:
@@ -2206,6 +2872,7 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     'doc_number': doc_number.strip() if doc_number else '',
                     'pub_date': pub_date.strip() if pub_date else '',
                     'validity': validity.strip() if validity else '',
+                    'issue_department': issue_department.strip() if issue_department else '',  # 发布机关（用于地区识别）
                     'content': content_text.strip(),
                     'raw_html': resp.text,
                     'access_blocked': access_blocked
@@ -3230,6 +3897,346 @@ class GuangdongSpider(EnhancedBaseCrawler):
 
         logger.info(f"分类 {category_name} 年份分割爬取完成，共获取 {len(all_policies)} 条政策")
         return all_policies
+    
+    def _get_department_name_by_lvalue(self, lvalue: str) -> str:
+        """
+        根据lvalue获取发布机关名称（用于日志显示）
+        
+        Args:
+            lvalue: 发布机关lvalue值
+        
+        Returns:
+            str: 发布机关名称
+        """
+        dept_map = {
+            '81901': '广东省人大(含常委会)',
+            '81902': '广东省人民政府',
+            '81903': '广东省其他机构',
+            '81937': '中山市人大(含常委会)',
+            '81938': '中山市人民政府',
+            '81939': '中山市其他机构',
+        }
+        return dept_map.get(lvalue, f'发布机关(lvalue={lvalue})')
+    
+    def _crawl_category_by_department(self, category_name: str, category_code: str, issue_department_lvalue: str,
+                                     callback=None, stop_callback=None, policy_callback=None, keywords=None,
+                                     start_date=None, end_date=None, disable_speed_limit=False):
+        """
+        直接按分类代码和发布机关获取政策（不使用年份分割）
+        
+        Args:
+            category_name: 分类名称
+            category_code: 分类代码
+            issue_department_lvalue: 发布机关lvalue值
+            callback: 进度回调函数
+            stop_callback: 停止回调函数
+            policy_callback: 政策数据回调函数
+            keywords: 关键词列表
+            start_date: 起始日期
+            end_date: 结束日期
+            disable_speed_limit: 是否禁用速度限制
+        
+        Returns:
+            List[Dict]: 政策列表
+        """
+        logger.info(f"开始按发布机关获取: {category_name} (代码: {category_code}, lvalue: {issue_department_lvalue})")
+        
+        api_config = self._get_category_api_config(category_code)
+        self.current_api_config = api_config
+        
+        # 初始化：先访问高级搜索页面来设置会话上下文
+        try:
+            init_url = api_config.get('init_page', f"{self.base_url}/{api_config['menu']}/adv")
+            logger.debug(f"初始化会话: 访问 {init_url}")
+            init_resp, _ = self._session_get(init_url, timeout=10)
+            if init_resp and init_resp.status_code == 200:
+                logger.debug("会话初始化成功")
+            time.sleep(0.5)  # 短暂延迟
+        except Exception as e:
+            logger.warning(f"会话初始化失败（继续尝试）: {e}")
+        
+        # 注意：测试脚本显示，使用发布机关筛选时不需要ClassSearch初始化
+        # 直接使用RecordSearch即可，ClassSearch可能导致冲突
+        # 因此这里不发送ClassSearch，直接使用RecordSearch
+        
+        policies = []
+        page_index = 1
+        max_pages = MAX_RECORDS_PER_BATCH // 20  # 接口页数上限
+        empty_page_count = 0
+        max_empty_pages = 5  # 连续空页数限制
+        prev_page_policies = None  # 保存上一页的政策数据，用于检测重复
+        consecutive_duplicate_count = 0  # 连续重复页面计数
+        max_consecutive_duplicates = 3  # 最大连续重复页面数（超过此数才停止）
+        
+        while page_index <= max_pages and empty_page_count < max_empty_pages:
+            if stop_callback and stop_callback():
+                logger.info("用户已停止爬取")
+                break
+            
+            if callback:
+                callback(f"正在获取 {category_name} - 第 {page_index} 页")
+            
+            # 获取搜索参数（直接传入发布机关lvalue，避免重复设置）
+            # 如果issue_department_lvalue为空字符串，则传入None表示不使用发布机关筛选
+            effective_lvalue = issue_department_lvalue if issue_department_lvalue else None
+            search_params = self._get_search_parameters(
+                keywords=keywords,
+                category_code=category_code,
+                page_index=page_index,
+                page_size=20,
+                start_date=start_date,
+                end_date=end_date,
+                filter_year=None,  # 不使用年份筛选
+                api_config=api_config,
+                issue_department_lvalue=effective_lvalue  # 空字符串转为None
+            )
+            
+            # 使用带翻页校验的请求方法（处理验证码限制）
+            # 注意：从第2页开始，网站可能需要翻页校验接口（GetRecordListTurningLimit）
+            # 特别是第5-6页可能触发验证码限制
+            try:
+                prev_page_index = page_index - 1 if page_index > 1 else None
+                resp = self._request_page_with_check(
+                    page_index,
+                    search_params,
+                    prev_page_index,
+                    api_config=api_config
+                )
+                
+                if not resp or resp.status_code != 200:
+                    if resp:
+                        logger.warning(f"第 {page_index} 页搜索请求失败: HTTP {resp.status_code}")
+                    else:
+                        logger.warning(f"第 {page_index} 页搜索请求失败: 无响应")
+                    
+                    # 检查是否是验证码限制导致的失败
+                    if resp and resp.status_code in [403, 429]:
+                        logger.warning(f"第 {page_index} 页可能遇到验证码限制（HTTP {resp.status_code}），尝试轮换会话后重试")
+                        if self._rotate_session():
+                            logger.info("会话轮换成功，继续尝试")
+                            # 重新初始化会话
+                            try:
+                                init_url = api_config.get('init_page', f"{self.base_url}/{api_config['menu']}/adv")
+                                init_resp, _ = self._session_get(init_url, timeout=10)
+                                if init_resp and init_resp.status_code == 200:
+                                    logger.debug("会话重新初始化成功")
+                                time.sleep(1)  # 短暂延迟
+                            except Exception as e:
+                                logger.warning(f"会话重新初始化失败: {e}")
+                    
+                    empty_page_count += 1
+                    page_index += 1
+                    continue
+                
+                # 检查响应内容是否包含访问限制
+                # 注意：验证码检测已由_request_page_with_check处理，这里只检查访问限制
+                # 如果响应状态码是200，先尝试解析，如果能解析出数据，说明不是验证码限制
+                if resp.text:
+                    # 先尝试解析，如果能解析出政策数据，说明响应正常
+                    page_policies = self._parse_policy_list_html(
+                        resp.text,
+                        callback=callback,
+                        stop_callback=stop_callback,
+                        category_name=category_name,
+                        policy_callback=policy_callback
+                    )
+                    
+                    # 如果能解析出政策数据，说明响应正常，不需要检查验证码
+                    if page_policies:
+                        # 响应正常，继续处理
+                        pass
+                    else:
+                        # 无法解析出数据，可能是验证码限制或其他问题
+                        # 检查访问限制（仅在真正检测到限制时才处理）
+                        if self._handle_access_limit(resp.text):
+                            logger.warning(f"第 {page_index} 页检测到访问限制，已处理，继续下一页")
+                            # 访问限制已处理（轮换会话等），继续尝试下一页
+                            page_index += 1
+                            time.sleep(2)  # 短暂延迟
+                            continue
+                        
+                        # 检查是否真的遇到验证码限制（更严格的检测）
+                        # 只有当响应明显是验证码页面时才处理
+                        # 检查是否是验证码页面：包含验证码输入框或验证码图片
+                        verifycode_strong_indicators = [
+                            "请输入验证码",
+                            "验证码错误",
+                            "验证码已过期",
+                            "需要输入验证码",
+                            "验证码输入框"
+                        ]
+                        # 检查是否包含验证码输入框的常见HTML元素
+                        has_verifycode_input = (
+                            'id="verifycode"' in resp.text.lower() or
+                            'name="verifycode"' in resp.text.lower() or
+                            'class="verifycode"' in resp.text.lower() or
+                            '验证码输入框' in resp.text
+                        )
+                        is_verifycode_page = any(indicator in resp.text for indicator in verifycode_strong_indicators)
+                        
+                        # 只有当明确是验证码页面时才处理（避免误判）
+                        if is_verifycode_page and has_verifycode_input:
+                            logger.warning(f"第 {page_index} 页明确检测到验证码限制，尝试轮换会话")
+                            if self._rotate_session():
+                                logger.info("会话轮换成功，继续尝试")
+                                # 重新初始化会话
+                                try:
+                                    init_url = api_config.get('init_page', f"{self.base_url}/{api_config['menu']}/adv")
+                                    init_resp, _ = self._session_get(init_url, timeout=10)
+                                    if init_resp and init_resp.status_code == 200:
+                                        logger.debug("会话重新初始化成功")
+                                    time.sleep(2)  # 延迟后重试
+                                except Exception as e:
+                                    logger.warning(f"会话重新初始化失败: {e}")
+                            # 重试当前页（但只重试一次，避免无限循环）
+                            # 注意：这里不应该无限重试，应该继续处理响应
+                            logger.info(f"第 {page_index} 页验证码限制已处理，继续解析响应")
+                            # 重新解析响应（可能已经更新）
+                            page_policies = self._parse_policy_list_html(
+                                resp.text,
+                                callback=callback,
+                                stop_callback=stop_callback,
+                                category_name=category_name,
+                                policy_callback=policy_callback
+                            )
+                else:
+                    # 响应为空，无法解析
+                    page_policies = []
+                
+                if page_policies:
+                    # 检查当前页与上一页是否完全一致
+                    if prev_page_policies is not None and page_index > 1:
+                        # 比较两页的政策数据
+                        if self._are_pages_identical(prev_page_policies, page_policies):
+                            logger.warning(f"第 {page_index} 页与第 {page_index - 1} 页完全一致")
+                            logger.info(f"  上一页政策: {len(prev_page_policies)} 条")
+                            logger.info(f"  当前页政策: {len(page_policies)} 条")
+                            # 显示前几条政策的标题，便于调试
+                            if prev_page_policies:
+                                logger.info(f"  上一页前3条: {[p.get('title', '')[:50] for p in prev_page_policies[:3]]}")
+                            if page_policies:
+                                logger.info(f"  当前页前3条: {[p.get('title', '')[:50] for p in page_policies[:3]]}")
+                            
+                            # 检测到重复页面时，先尝试轮换会话（可能是验证码限制导致的）
+                            logger.warning("检测到重复页面，尝试轮换会话后重试...")
+                            if self._rotate_session():
+                                logger.info("会话轮换成功，重新初始化会话")
+                                # 重新初始化会话
+                                try:
+                                    init_url = api_config.get('init_page', f"{self.base_url}/{api_config['menu']}/adv")
+                                    init_resp, _ = self._session_get(init_url, timeout=10)
+                                    if init_resp and init_resp.status_code == 200:
+                                        logger.debug("会话重新初始化成功")
+                                    time.sleep(2)  # 延迟后重试
+                                    
+                                    # 重试当前页（使用新的会话）
+                                    logger.info(f"使用新会话重试第 {page_index} 页...")
+                                    prev_page_index = page_index - 1 if page_index > 1 else None
+                                    retry_resp = self._request_page_with_check(
+                                        page_index,
+                                        search_params,
+                                        prev_page_index,
+                                        api_config=api_config
+                                    )
+                                    
+                                    if retry_resp and retry_resp.status_code == 200:
+                                        # 重新解析响应
+                                        retry_policies = self._parse_policy_list_html(
+                                            retry_resp.text,
+                                            callback=callback,
+                                            stop_callback=stop_callback,
+                                            category_name=category_name,
+                                            policy_callback=policy_callback
+                                        )
+                                        
+                                        # 检查重试后的页面是否仍然与上一页相同
+                                        if retry_policies and not self._are_pages_identical(prev_page_policies, retry_policies):
+                                            logger.info(f"会话轮换后，第 {page_index} 页获取到新数据，继续爬取")
+                                            page_policies = retry_policies
+                                            # 继续处理，不break
+                                        else:
+                                            # 会话轮换后仍然重复，记录连续重复计数
+                                            consecutive_duplicate_count += 1
+                                            logger.warning(f"会话轮换后，第 {page_index} 页仍然与上一页相同（连续重复 {consecutive_duplicate_count} 次）")
+                                            
+                                            if consecutive_duplicate_count >= max_consecutive_duplicates:
+                                                logger.warning(f"连续 {consecutive_duplicate_count} 页重复，停止查询")
+                                                break
+                                            
+                                            # 尝试跳过当前页继续下一页
+                                            logger.info(f"尝试跳过第 {page_index} 页，继续下一页...")
+                                            # 不添加当前页数据，直接跳过
+                                            page_policies = []  # 设置为空，不添加到policies中
+                                            # 不更新prev_page_policies，保持上一页的数据
+                                            # 继续循环，尝试下一页
+                                            page_index += 1
+                                            continue  # 跳过后续处理，直接进入下一轮循环
+                                    else:
+                                        # 重试失败，尝试跳过当前页继续下一页
+                                        consecutive_duplicate_count += 1
+                                        logger.warning(f"会话轮换后重试失败，尝试跳过当前页继续下一页（连续重复 {consecutive_duplicate_count} 次）")
+                                        if consecutive_duplicate_count >= max_consecutive_duplicates:
+                                            logger.warning(f"连续 {consecutive_duplicate_count} 页重复，停止查询")
+                                            break
+                                        page_policies = []
+                                        page_index += 1
+                                        continue
+                                except Exception as e:
+                                    logger.warning(f"会话重新初始化失败: {e}")
+                                    consecutive_duplicate_count += 1
+                                    logger.info(f"尝试跳过当前页继续下一页（连续重复 {consecutive_duplicate_count} 次）")
+                                    if consecutive_duplicate_count >= max_consecutive_duplicates:
+                                        logger.warning(f"连续 {consecutive_duplicate_count} 页重复，停止查询")
+                                        break
+                                    page_policies = []
+                                    page_index += 1
+                                    continue
+                            else:
+                                # 会话轮换失败，尝试跳过当前页继续下一页
+                                consecutive_duplicate_count += 1
+                                logger.warning(f"会话轮换失败，尝试跳过当前页继续下一页（连续重复 {consecutive_duplicate_count} 次）")
+                                if consecutive_duplicate_count >= max_consecutive_duplicates:
+                                    logger.warning(f"连续 {consecutive_duplicate_count} 页重复，停止查询")
+                                    break
+                                page_policies = []
+                                page_index += 1
+                                continue
+                    
+                    # 只有在获取到有效数据时才添加到结果中
+                    if page_policies:
+                        policies.extend(page_policies)
+                        empty_page_count = 0
+                        consecutive_duplicate_count = 0  # 重置连续重复计数
+                        logger.info(f"第 {page_index} 页获取到 {len(page_policies)} 条政策，累计 {len(policies)} 条")
+                        
+                        # 保存当前页数据作为下一页的上一页
+                        prev_page_policies = page_policies.copy()
+                    else:
+                        # 如果没有获取到数据（可能是跳过的重复页），不更新prev_page_policies
+                        empty_page_count += 1
+                        logger.debug(f"第 {page_index} 页未获取到政策（可能是跳过的重复页）")
+                else:
+                    empty_page_count += 1
+                    logger.debug(f"第 {page_index} 页未获取到政策")
+                    # 空页时也保存，以便检测连续空页
+                    prev_page_policies = []
+                
+                # 递增页码（如果使用了continue跳过重复页，page_index已经在continue之前递增了）
+                page_index += 1
+                
+                # 速度限制
+                if not disable_speed_limit:
+                    delay = random.uniform(2.0, 5.0)
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logger.error(f"获取第 {page_index} 页失败: {e}", exc_info=True)
+                empty_page_count += 1
+                page_index += 1
+                continue
+        
+        logger.info(f"分类 {category_name} (发布机关lvalue={issue_department_lvalue}) 获取完成，共获取 {len(policies)} 条政策")
+        return policies
 
     def _crawl_category_year(self, category_name: str, category_code: str, year: Optional[int], expected_count: Optional[int],
                            callback=None, stop_callback=None, policy_callback=None, keywords=None, start_date=None, end_date=None, api_config=None, disable_speed_limit=False):
@@ -3285,7 +4292,12 @@ class GuangdongSpider(EnhancedBaseCrawler):
             try:
                 prev_page_index = page_index - 1 if page_index > 1 else None
 
-                # 构建搜索参数
+                # 构建搜索参数（使用年份筛选，但优先使用发布机关筛选）
+                # 注意：此方法已废弃，仅用于兼容性
+                issue_department_lvalue = None
+                if category_code:
+                    issue_department_lvalue = self._get_issue_department_lvalue(category_code)
+                
                 search_params = self._get_search_parameters(
                     keywords=keywords,
                     category_code=category_code,
@@ -3294,8 +4306,9 @@ class GuangdongSpider(EnhancedBaseCrawler):
                     start_date=start_date,
                     end_date=end_date,
                     old_page_index=prev_page_index,
-                    filter_year=year,
-                    api_config=api_config
+                    filter_year=year,  # 使用年份筛选（此方法已废弃）
+                    api_config=api_config,
+                    issue_department_lvalue=issue_department_lvalue  # 如果可用，优先使用发布机关筛选
                 )
 
                 resp = self._request_page_with_check(
